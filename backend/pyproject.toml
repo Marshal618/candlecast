@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+pythonpath = ["."]
+markers = ["integration: hits the network and loads model weights (deselected by default)"]
+addopts = "-m 'not integration'"
+filterwarnings = ["ignore::DeprecationWarning", "ignore::FutureWarning"]

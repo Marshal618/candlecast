@@ -1,0 +1,16 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      KD_DEVICE: cpu
+      KD_PRELOAD_MODELS: small
+    volumes:
+      # Persist downloaded model weights and the market-data cache across restarts
+      - hf-cache:/app/hf-cache
+      - data:/app/data
+
+volumes:
+  hf-cache:
+  data:
