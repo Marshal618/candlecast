@@ -18,6 +18,8 @@ from app.config import BACKEND_DIR, settings
 sys.path.insert(0, str(BACKEND_DIR / "vendor" / "kronos"))
 from model import Kronos, KronosPredictor, KronosTokenizer  # noqa: E402
 
+from app.services import tokens  # noqa: E402  (needs the vendor path above)
+
 
 @dataclass(frozen=True)
 class ModelSpec:
@@ -117,16 +119,37 @@ class Forecaster:
         return out
 
 
+    def inspect(self, ctx: pd.DataFrame, history: pd.DataFrame, model: str, segments: int) -> dict:
+        """Deterministic post-hoc token analysis of one context window (see services/tokens.py)."""
+        with self._lock:
+            return tokens.inspect(self._predictor(model), ctx, history, segments)
+
+
+def projected_candles(paths: np.ndarray) -> np.ndarray:
+    """Pick the sampled path whose closes sit nearest the per-bar median (the medoid).
+
+    A per-field median of OHLC can produce impossible bars (high below close), whereas
+    one real sampled path keeps each bar's open/high/low/close mutually consistent.
+    Returns (horizon, 4) OHLC with high/low clamped to enclose open and close.
+    """
+    close = paths[:, :, FEATURES.index("close")]
+    median = np.median(close, axis=0)
+    medoid = int(np.argmin(np.sum((close - median) ** 2, axis=1)))
+    ohlc = paths[medoid, :, :4].copy()
+    ohlc[:, 1] = ohlc.max(axis=1)
+    ohlc[:, 2] = ohlc.min(axis=1)
+    return ohlc
+
+
 def summarize(paths: np.ndarray, last_close: float) -> dict:
     """Turn sampled paths (samples, horizon, 6) into chart-ready stats."""
     close = paths[:, :, FEATURES.index("close")]
     final = close[:, -1]
-    median_ohlc = np.median(paths[:, :, :4], axis=0)
     return {
         "median": np.median(close, axis=0),
         "p10": np.percentile(close, 10, axis=0),
         "p90": np.percentile(close, 90, axis=0),
-        "ohlc": median_ohlc,
+        "ohlc": projected_candles(paths),
         "p_up": float(np.mean(final > last_close)),
         "expected_return": float(np.median(final) / last_close - 1.0),
         "band_width_pct": float((np.percentile(final, 90) - np.percentile(final, 10)) / last_close),

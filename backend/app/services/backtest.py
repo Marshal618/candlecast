@@ -1,10 +1,57 @@
 """Walk-forward backtest: forecast from past windows using only data available then,
-then score against what actually happened, alongside naive baselines."""
+then score against what actually happened, alongside naive baselines.
+
+Following Gu, Kelly & Xiu, accuracy is also reported as out-of-sample R^2 against a
+zero-return forecast, next to a walk-forward ridge regression on standard technical features.
+Return prediction R^2 is tiny even for good models; negative means worse than predicting zero.
+"""
 
 import numpy as np
 import pandas as pd
 
 from app.services.forecaster import Forecaster, summarize
+
+
+RIDGE_LAGS = (1, 5, 10, 20)
+RIDGE_TRAIN_ROWS = 1000
+RIDGE_ALPHA = 10.0
+
+
+def ridge_features(df: pd.DataFrame) -> np.ndarray:
+    """Per-bar features known at that bar's close: lagged log returns, volatility, volume z-score."""
+    logc = np.log(df["close"].to_numpy())
+    r1 = np.diff(logc, prepend=np.nan)
+    cols = [logc - np.roll(logc, k) for k in RIDGE_LAGS]
+    vol = pd.Series(r1).rolling(20).std().to_numpy()
+    logv = np.log1p(df["volume"].to_numpy())
+    vz = (logv - pd.Series(logv).rolling(20).mean().to_numpy()) / (pd.Series(logv).rolling(20).std().to_numpy() + 1e-9)
+    x = np.column_stack(cols + [vol, vz])
+    x[: max(RIDGE_LAGS) + 1] = np.nan
+    return x
+
+
+def ridge_forecast(df: pd.DataFrame, origin: int, horizon: int, x: np.ndarray | None = None) -> float | None:
+    """Predict the simple return from bar `origin`'s close to `origin + horizon`'s close.
+
+    Trains only on rows whose target was fully realized by `origin`, so nothing leaks.
+    """
+    x = ridge_features(df) if x is None else x
+    logc = np.log(df["close"].to_numpy())
+    rows = np.arange(max(0, origin - horizon - RIDGE_TRAIN_ROWS), origin - horizon + 1)
+    rows = rows[~np.isnan(x[rows]).any(axis=1)]
+    if len(rows) < 50 or np.isnan(x[origin]).any():
+        return None
+    X, y = x[rows], logc[rows + horizon] - logc[rows]
+    mu, sd = X.mean(axis=0), X.std(axis=0) + 1e-12
+    Z = (X - mu) / sd
+    beta = np.linalg.solve(Z.T @ Z + RIDGE_ALPHA * np.eye(Z.shape[1]), Z.T @ (y - y.mean()))
+    return float(np.expm1(y.mean() + ((x[origin] - mu) / sd) @ beta))
+
+
+def r2_oos(actual: np.ndarray, predicted: np.ndarray) -> float:
+    """Out-of-sample R^2 against a zero-return forecast (Gu, Kelly & Xiu 2020)."""
+    denom = np.sum(actual**2)
+    return float(1 - np.sum((actual - predicted) ** 2) / denom) if denom > 0 else 0.0
 
 
 def run_backtest(
@@ -34,8 +81,9 @@ def run_backtest(
         contexts, [a.index for a in actuals], model, samples, temperature, top_p
     )
 
+    features = ridge_features(df)
     rows = []
-    for ctx, actual, p in zip(contexts, actuals, paths):
+    for e, ctx, actual, p in zip(ends, contexts, actuals, paths):
         last = float(ctx["close"].iloc[-1])
         s = summarize(p, last)
         actual_close = actual["close"].to_numpy()
@@ -54,6 +102,7 @@ def run_backtest(
                 "covered": bool(s["p10"][-1] <= actual_final <= s["p90"][-1]),
                 "mae_pct": float(np.mean(np.abs(s["median"] - actual_close)) / last),
                 "naive_mae_pct": float(np.mean(np.abs(last - actual_close)) / last),
+                "ridge_return": ridge_forecast(df, e - 1, horizon, features),
             }
         )
 
@@ -68,6 +117,16 @@ def run_backtest(
         "mae_pct": float(np.mean([r["mae_pct"] for r in rows])),
         "naive_mae_pct": float(np.mean([r["naive_mae_pct"] for r in rows])),
     }
+    actual_ret = np.array([r["actual_final"] / r["last_close"] - 1 for r in rows])
+    kronos_ret = np.array([r["pred_final"] / r["last_close"] - 1 for r in rows])
+    metrics["r2_oos"] = r2_oos(actual_ret, kronos_ret)
+    scored = [(a, r["ridge_return"]) for a, r in zip(actual_ret, rows) if r["ridge_return"] is not None]
+    if scored:
+        a, pr = np.array(scored).T
+        metrics["ridge_r2_oos"] = r2_oos(a, pr)
+        metrics["ridge_hit_rate"] = float(np.mean(np.sign(pr) == np.sign(a)))
+    else:
+        metrics["ridge_r2_oos"] = metrics["ridge_hit_rate"] = None
 
     first = ends[0] - lookback
     span = df.iloc[max(first, ends[0] - 50) : ends[-1] + horizon]

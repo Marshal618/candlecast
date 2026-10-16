@@ -6,9 +6,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.schemas import BacktestRequest, ForecastRequest, Interval
+from app.schemas import BacktestRequest, ForecastRequest, Interval, StrategyRequest, TokensRequest
 from app.services.backtest import run_backtest
 from app.services.forecaster import MODELS, Forecaster, Timer, summarize
+from app.services.strategy import run_strategy
 from app.services.market_data import CachedMarketData, MarketDataError, YFinanceProvider, future_timestamps
 
 market = CachedMarketData(YFinanceProvider(), settings.cache_path)
@@ -22,7 +23,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Kronos Forecast Dashboard", lifespan=lifespan)
+app = FastAPI(title="Candlecast", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
@@ -137,6 +138,35 @@ async def backtest(req: BacktestRequest):
             )
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
+    strategy = run_strategy(df, result["windows"], req.horizon, **req.strategy.model_dump())
+    return {
+        "symbol": req.symbol.upper(),
+        "interval": req.interval,
+        "model": req.model,
+        "horizon": req.horizon,
+        "latency_ms": round(t.ms),
+        **result,
+        "strategy": strategy,
+    }
+
+
+@app.post("/api/strategy")
+async def strategy(req: StrategyRequest):
+    df = await _load(req.symbol, req.interval)
+    try:
+        return run_strategy(df, [w.model_dump() for w in req.windows], req.horizon, **req.strategy.model_dump())
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
+
+
+@app.post("/api/tokens")
+async def tokens(req: TokensRequest):
+    df = await _load(req.symbol, req.interval)
+    lookback = _check_lookback(req.model, req.lookback, len(df))
+    if lookback < 32:
+        raise HTTPException(422, f"Only {len(df)} bars of history available; need at least 32.")
+    with Timer() as t:
+        result = await run_in_threadpool(forecaster.inspect, df.tail(lookback), df, req.model, req.segments)
     return {"symbol": req.symbol.upper(), "interval": req.interval, "model": req.model, "latency_ms": round(t.ms), **result}
 
 

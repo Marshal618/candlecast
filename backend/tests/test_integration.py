@@ -51,3 +51,30 @@ def test_unknown_symbol_is_404(client):
 def test_lookback_over_context_is_422(client):
     r = client.post("/api/forecast", json={"symbol": "AAPL", "model": "small", "lookback": 1000})
     assert r.status_code == 422
+
+
+def test_tokens_inspection(client):
+    r = client.post("/api/tokens", json={"symbol": "SPY", "interval": "1d", "model": "mini", "lookback": 256, "segments": 8})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body["bars"]) == 256
+    assert body["bars"][0]["surprisal"] is None and body["bars"][1]["surprisal"] > 0
+    n = body["next"]
+    assert 0 <= n["entropy_bits"] <= n["max_entropy_bits"]
+    probs = [t["p"] for t in n["top"]]
+    assert probs == sorted(probs, reverse=True) and sum(probs) <= 1 + 1e-6
+    assert len(body["attribution"]) == 8 and all(a["kl_bits"] >= -1e-9 for a in body["attribution"])
+    # Fine tokens should reconstruct prices at least roughly as well as coarse-only
+    s = body["summary"]
+    assert s["recon_mae_full_pct"] <= s["recon_mae_coarse_pct"] * 1.5
+    assert 0 <= body["semantics"]["explained"]["level"] <= 1
+
+
+def test_backtest_reports_r2_and_ridge(client):
+    r = client.post(
+        "/api/backtest",
+        json={"symbol": "SPY", "interval": "1d", "model": "mini", "lookback": 256, "horizon": 5, "windows": 6, "samples": 3},
+    )
+    m = r.json()["metrics"]
+    assert m["r2_oos"] <= 1 and m["ridge_r2_oos"] <= 1
+    assert 0 <= m["ridge_hit_rate"] <= 1

@@ -1,14 +1,18 @@
 :root {
-  --bg: #0d1117;
-  --panel: #161b22;
-  --border: #262d38;
-  --text: #e6edf3;
-  --muted: #8b949e;
-  --accent: #f5a524;
-  --up: #26a69a;
-  --down: #ef5350;
-  --blue: #58a6ff;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --bg: #101418;
+  --panel: #161b20;
+  --border: #252c33;
+  --border-strong: #3a444e;
+  --text: #d6d9d4;
+  --muted: #7a858c;
+  --accent: #5fb3a1;
+  --accent-dim: #2f6b5f;
+  --up: #8fb39a;
+  --down: #c0603f;
+  --blue: #5fb3a1;
+  --projected: #d8b45c;
+  font-family: 'IBM Plex Mono', ui-monospace, Menlo, Consolas, monospace;
+  font-size: 13px;
   color: var(--text);
   background: var(--bg);
   color-scheme: dark;
@@ -28,4 +32,8 @@ button,
 input {
   font: inherit;
   color: inherit;
+}
+
+::selection {
+  background: var(--accent-dim);
 }

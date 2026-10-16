@@ -7,8 +7,11 @@ import {
   type Health,
   type Interval,
   type ModelName,
+  type StrategyMode,
+  type StrategyResult,
+  type TokensResponse,
 } from './api'
-import { BacktestChart, PriceChart } from './charts'
+import { BacktestChart, EquityChart, PriceChart, TokenChart, type TokenOverlay } from './charts'
 import './App.css'
 
 const INTERVALS: Interval[] = ['5m', '15m', '1h', '1d']
@@ -47,13 +50,19 @@ export default function App() {
   const [samples, setSamples] = useState(10)
   const [temperature, setTemperature] = useState(1.0)
   const [topP, setTopP] = useState(0.9)
-  const [tab, setTab] = useState<'forecast' | 'backtest'>('forecast')
+  const [tab, setTab] = useState<'forecast' | 'backtest' | 'tokens'>('forecast')
+  const [tokens, setTokens] = useState<TokensResponse | null>(null)
+  const [overlay, setOverlay] = useState<TokenOverlay>('surprisal')
 
   const [watchlist, setWatchlist] = useState<string[]>(loadWatchlist)
   const [health, setHealth] = useState<Health | null>(null)
   const [candles, setCandles] = useState<Candle[]>([])
   const [forecast, setForecast] = useState<ForecastResponse | null>(null)
   const [backtest, setBacktest] = useState<BacktestResponse | null>(null)
+  const [mode, setMode] = useState<StrategyMode>('long_only')
+  const [enterP, setEnterP] = useState(0.6)
+  const [costBps, setCostBps] = useState(5)
+  const [strategy, setStrategy] = useState<StrategyResult | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -71,6 +80,8 @@ export default function App() {
     let cancelled = false
     setForecast(null)
     setBacktest(null)
+    setStrategy(null)
+    setTokens(null)
     setError(null)
     setBusy('Loading candles…')
     api
@@ -88,6 +99,32 @@ export default function App() {
   }, [symbol, interval])
 
   const params = { symbol, interval, model, lookback, samples, temperature, top_p: topP }
+  const strategyParams = { mode, enter_p: enterP, cost_bps: costBps }
+
+  // Re-score the existing backtest forecasts when the rules change; no model calls involved
+  useEffect(() => {
+    if (!backtest) return
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => {
+      api
+        .strategy(
+          {
+            symbol: backtest.symbol,
+            interval: backtest.interval,
+            horizon: backtest.horizon,
+            windows: backtest.windows.map((w) => ({ origin_time: w.origin_time, p_up: w.p_up })),
+            strategy: { mode, enter_p: enterP, cost_bps: costBps },
+          },
+          ctrl.signal,
+        )
+        .then(setStrategy)
+        .catch((e) => e.name !== 'AbortError' && setError(e.message))
+    }, 150)
+    return () => {
+      clearTimeout(timer)
+      ctrl.abort()
+    }
+  }, [backtest, mode, enterP, costBps])
 
   const runForecast = async () => {
     setError(null)
@@ -107,8 +144,29 @@ export default function App() {
     setError(null)
     setBusy(`Backtesting Kronos-${model} (this can take a while)…`)
     try {
-      setBacktest(await api.backtest({ ...params, horizon, windows: 20, samples: Math.min(samples, 5) }))
+      const r = await api.backtest({
+        ...params,
+        horizon,
+        windows: 20,
+        samples: Math.min(samples, 5),
+        strategy: strategyParams,
+      })
+      setStrategy(r.strategy)
+      setBacktest(r)
       setTab('backtest')
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const runTokens = async () => {
+    setError(null)
+    setBusy(`Inspecting Kronos-${model} tokens…`)
+    try {
+      setTokens(await api.tokens({ symbol, interval, model, lookback }))
+      setTab('tokens')
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -131,16 +189,27 @@ export default function App() {
   return (
     <div className="app">
       <header className="header">
-        <h1>Kronos Forecast</h1>
-        <span className="muted">
-          {health ? `device: ${health.device} · loaded: ${health.loaded_models.join(', ') || 'none'}` : 'connecting…'}
+        <h1>CANDLECAST</h1>
+        <span className="tag">{symbol}</span>
+        <span className="tag">{interval}</span>
+        <span className="muted header-meta">
+          {health ? (
+            <>
+              <i className={`led ${busy ? 'busy' : 'ok'}`} /> {health.device} · {health.loaded_models.join(',') || 'idle'}
+            </>
+          ) : (
+            <>
+              <i className="led off" /> offline
+            </>
+          )}
         </span>
       </header>
 
       <aside className="sidebar">
         <form onSubmit={submitSymbol} className="symbol-form">
-          <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Symbol (AAPL, BTC-USD)" />
-          <button type="submit">Load</button>
+          <span className="prompt">&gt;</span>
+          <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="AAPL, BTC-USD" spellCheck={false} />
+          <button type="submit">Go</button>
         </form>
 
         <div className="watchlist">
@@ -164,9 +233,8 @@ export default function App() {
           ))}
         </div>
 
-        <div className="section-title">Data</div>
+        <div className="section-title">Interval</div>
         <label>
-          Interval
           <div className="segmented">
             {INTERVALS.map((i) => (
               <button key={i} className={i === interval ? 'active' : ''} onClick={() => setBarInterval(i)}>
@@ -178,7 +246,6 @@ export default function App() {
 
         <div className="section-title">Model</div>
         <label>
-          Kronos size
           <div className="segmented">
             {MODELS.map((m) => (
               <button key={m} className={m === model ? 'active' : ''} onClick={() => setModel(m)}>
@@ -187,18 +254,24 @@ export default function App() {
             ))}
           </div>
         </label>
-        <Slider label="Horizon (bars)" value={horizon} min={1} max={120} onChange={setHorizon} />
-        <Slider label="Lookback (bars)" value={lookback} min={32} max={maxContext} onChange={setLookback} />
-        <Slider label="Sample paths" value={samples} min={1} max={50} onChange={setSamples} />
-        <Slider label="Temperature" value={temperature} min={0.1} max={2} step={0.1} onChange={setTemperature} />
-        <Slider label="Top-p" value={topP} min={0.1} max={1} step={0.05} onChange={setTopP} />
+        <Slider label="horizon" value={horizon} min={1} max={120} onChange={setHorizon} />
+        <Slider label="lookback" value={lookback} min={32} max={maxContext} onChange={setLookback} />
+        <details className="advanced">
+          <summary>Sampling</summary>
+          <Slider label="paths" value={samples} min={1} max={50} onChange={setSamples} />
+          <Slider label="temp" value={temperature} min={0.1} max={2} step={0.1} onChange={setTemperature} />
+          <Slider label="top_p" value={topP} min={0.1} max={1} step={0.05} onChange={setTopP} />
+        </details>
 
         <div className="actions">
           <button className="primary" disabled={!!busy || candles.length === 0} onClick={runForecast}>
-            Forecast
+            ▶ Run
           </button>
           <button disabled={!!busy || candles.length === 0} onClick={runBacktest}>
             Backtest
+          </button>
+          <button className="span2" disabled={!!busy || candles.length === 0} onClick={runTokens}>
+            Inspect tokens
           </button>
         </div>
       </aside>
@@ -211,70 +284,302 @@ export default function App() {
           <button className={tab === 'backtest' ? 'active' : ''} onClick={() => setTab('backtest')}>
             Backtest
           </button>
-          <span className="status">{busy ?? ''}</span>
+          <button className={tab === 'tokens' ? 'active' : ''} onClick={() => setTab('tokens')}>
+            Tokens
+          </button>
+          <span className="status">{busy ? `> ${busy}` : ''}</span>
         </div>
 
         {error && <div className="error">{error}</div>}
 
-        {tab === 'forecast' ? (
+        {tab === 'tokens' ? (
+          tokens ? (
+            <TokensView t={tokens} candles={candles} overlay={overlay} setOverlay={setOverlay} interval={interval} />
+          ) : (
+            <div className="empty">// no token inspection yet. click "Inspect tokens" to see how Kronos reads this chart.</div>
+          )
+        ) : tab === 'forecast' ? (
           <>
             <div className="stats">
-              <Stat label="Last close" value={candles[candles.length - 1]?.close.toFixed(2) ?? '—'} />
+              <Stat label="last" value={candles[candles.length - 1]?.close.toFixed(2) ?? '—'} />
               <Stat
-                label={`P(up) in ${forecast?.forecast.length ?? horizon} bars`}
+                label={`p(up) +${forecast?.forecast.length ?? horizon}`}
                 value={forecast ? rate(forecast.stats.p_up) : '—'}
                 tone={forecast ? (forecast.stats.p_up >= 0.5 ? 'up' : 'down') : undefined}
               />
               <Stat
-                label="Median expected move"
+                label="exp move"
                 value={forecast ? pct(forecast.stats.expected_return, 2) : '—'}
                 tone={forecast ? (forecast.stats.expected_return >= 0 ? 'up' : 'down') : undefined}
               />
-              <Stat label="p10–p90 band width" value={forecast ? pct(forecast.stats.band_width_pct).slice(1) : '—'} />
-              <Stat label="Latency" value={forecast ? `${(forecast.latency_ms / 1000).toFixed(1)}s` : '—'} />
+              <Stat label="band p10–p90" value={forecast ? pct(forecast.stats.band_width_pct).slice(1) : '—'} />
+              <Stat label="latency" value={forecast ? `${(forecast.latency_ms / 1000).toFixed(1)}s` : '—'} />
             </div>
             <PriceChart candles={candles} forecast={forecast} interval={interval} />
             <p className="legend">
-              <span className="sw median" /> median of {forecast?.forecast.length ? samples : 'N'} sampled paths
-              <span className="sw band" /> p10 / p90 band
+              <span className="sw candle-hist" /> history
+              <span className="sw candle-proj" /> projected (hollow up / solid down)
+              <span className="sw median" /> median
+              <span className="sw band" /> p10–p90
             </p>
           </>
         ) : backtest ? (
           <>
             <div className="stats">
               <Stat
-                label="Direction hit rate"
+                label="hit rate"
                 value={rate(backtest.metrics.hit_rate)}
                 hint={`baseline ${rate(backtest.metrics.baseline_hit_rate)}`}
                 tone={backtest.metrics.hit_rate > backtest.metrics.baseline_hit_rate ? 'up' : 'down'}
               />
               <Stat
-                label="Close MAE"
+                label="close mae"
                 value={pct(backtest.metrics.mae_pct, 2).slice(1)}
                 hint={`naive ${pct(backtest.metrics.naive_mae_pct, 2).slice(1)}`}
                 tone={backtest.metrics.mae_pct < backtest.metrics.naive_mae_pct ? 'up' : 'down'}
               />
-              <Stat label="p10–p90 coverage" value={rate(backtest.metrics.coverage_p10_p90)} hint="ideal ≈ 80%" />
-              <Stat label="Windows" value={String(backtest.metrics.windows)} />
-              <Stat label="Latency" value={`${(backtest.latency_ms / 1000).toFixed(1)}s`} />
+              <Stat
+                label="r² oos"
+                value={pct(backtest.metrics.r2_oos, 1)}
+                hint={backtest.metrics.ridge_r2_oos == null ? 'vs zero forecast' : `ridge ${pct(backtest.metrics.ridge_r2_oos, 1)}`}
+                tone={backtest.metrics.r2_oos > Math.max(0, backtest.metrics.ridge_r2_oos ?? 0) ? 'up' : 'down'}
+              />
+              <Stat
+                label="ridge hit"
+                value={backtest.metrics.ridge_hit_rate == null ? '—' : rate(backtest.metrics.ridge_hit_rate)}
+                hint="linear ml baseline"
+              />
+              <Stat label="coverage" value={rate(backtest.metrics.coverage_p10_p90)} hint="ideal ≈ 80%" />
+              <Stat label="windows" value={String(backtest.metrics.windows)} />
+              <Stat label="latency" value={`${(backtest.latency_ms / 1000).toFixed(1)}s`} />
             </div>
             <BacktestChart result={backtest} interval={interval} />
             <p className="legend">
-              <span className="sw actual" /> actual close <span className="sw median" /> forecast at horizon end
-              <span className="sw band" /> p10 / p90 · dots below: green = direction right, red = wrong
+              <span className="sw actual" /> actual <span className="sw median" /> forecast @ horizon
+              <span className="sw band" /> p10–p90 · dots: green hit / red miss
             </p>
             <p className="muted small">
-              Baseline hit rate = always guessing the majority direction for this period. Naive MAE = predicting
-              no change. A model is only interesting if it beats both.
+              baseline = majority direction · naive = no change · r² oos vs a zero-return forecast (gu, kelly &amp; xiu);
+              negative = worse than predicting nothing · ridge = walk-forward regularized regression on lagged returns,
+              volatility, volume.
+            </p>
+
+            <div className="panel-title">Strategy</div>
+            <div className="strategy-controls">
+              <div className="segmented">
+                <button className={mode === 'long_only' ? 'active' : ''} onClick={() => setMode('long_only')}>
+                  long only
+                </button>
+                <button className={mode === 'long_short' ? 'active' : ''} onClick={() => setMode('long_short')}>
+                  long / short
+                </button>
+              </div>
+              <Slider label="long if p(up) ≥" value={enterP} min={0.5} max={1} step={0.05} onChange={setEnterP} />
+              <Slider label="cost bps" value={costBps} min={0} max={50} onChange={setCostBps} />
+            </div>
+            <p className="muted small rule">
+              rule: at each window origin, {mode === 'long_short' ? 'long' : 'go long'} if p(up) ≥ {enterP.toFixed(2)}
+              {mode === 'long_short' ? `, short if p(up) ≤ ${(1 - enterP).toFixed(2)}` : ''}, else flat. fill at next
+              bar open, hold {backtest.horizon} bars, pay {costBps} bps per side.
+            </p>
+            {strategy && <StrategyReport s={strategy} />}
+            {strategy && <EquityChart result={strategy} interval={interval} />}
+            <p className="legend">
+              <span className="sw actual" /> strategy <span className="sw benchmark" /> buy &amp; hold · arrows: entries
             </p>
           </>
         ) : (
-          <div className="empty">Run a backtest to see how Kronos's past forecasts compared to what happened.</div>
+          <div className="empty">// no backtest yet. run one to score past forecasts against reality.</div>
         )}
 
-        <p className="disclaimer">Research tool, not financial advice. Forecasts are probabilistic and often wrong.</p>
+        <p className="disclaimer">research tool · not financial advice · forecasts are probabilistic and often wrong</p>
       </main>
     </div>
+  )
+}
+
+const FEATURE_LABELS: Record<string, string> = {
+  level: 'price level in window',
+  volume: 'volume',
+  range: 'high–low range',
+  body: 'candle body',
+  return: 'bar return',
+}
+
+function TokensView({
+  t,
+  candles,
+  overlay,
+  setOverlay,
+  interval,
+}: {
+  t: TokensResponse
+  candles: Candle[]
+  overlay: TokenOverlay
+  setOverlay: (o: TokenOverlay) => void
+  interval: Interval
+}) {
+  const s = t.summary
+  const n = t.next
+  const sem = t.semantics
+  const features = Object.entries(sem.explained).sort((a, b) => b[1] - a[1])
+  return (
+    <>
+      <div className="stats">
+        <Stat label="tokens used" value={`${s.unique_s1}`} hint={`of ${t.vocab.s1} coarse · ${s.unique_s2} fine`} />
+        <Stat label="perplexity" value={s.perplexity.toFixed(0)} hint={`${s.mean_surprisal_bits.toFixed(1)} bits / candle`} />
+        <Stat label="next entropy" value={`${n.entropy_bits.toFixed(1)} b`} hint={`max ${n.max_entropy_bits} bits`} />
+        <Stat
+          label="token p(up)"
+          value={n.implied_p_up == null ? '—' : rate(n.implied_p_up)}
+          hint={n.implied_return == null ? '' : `next bar ${pct(n.implied_return, 2)}`}
+          tone={n.implied_p_up == null ? undefined : n.implied_p_up >= 0.5 ? 'up' : 'down'}
+        />
+        <Stat
+          label="recon error"
+          value={pct(s.recon_mae_full_pct, 2).slice(1)}
+          hint={`coarse only ${pct(s.recon_mae_coarse_pct, 2).slice(1)}`}
+        />
+        <Stat label="latency" value={`${(t.latency_ms / 1000).toFixed(1)}s`} />
+      </div>
+
+      <div className="tabs-inline segmented">
+        <button className={overlay === 'surprisal' ? 'active' : ''} onClick={() => setOverlay('surprisal')}>
+          surprisal
+        </button>
+        <button className={overlay === 'attribution' ? 'active' : ''} onClick={() => setOverlay('attribution')}>
+          attribution
+        </button>
+      </div>
+      <TokenChart result={t} candles={candles} overlay={overlay} interval={interval} />
+      <p className="legend">
+        <span className="sw candle-hist" /> candles <span className="sw median" /> decoded from coarse tokens only
+        {overlay === 'surprisal' ? (
+          <>
+            <span className="sw band" /> surprisal (bits): how unexpected each candle was to Kronos; brass = top 10%
+          </>
+        ) : (
+          <>
+            <span className="sw candle-hist" /> attribution (bps): how much each block pushes the next-bar outlook up
+            (sage) or down (rust), found by flattening that block
+          </>
+        )}
+      </p>
+
+      <div className="token-grid">
+        <div>
+          <div className="panel-title">Next-token candidates</div>
+          <table className="tok-table">
+            <thead>
+              <tr>
+                <th>token</th>
+                <th>p</th>
+                <th>seen</th>
+                <th>avg ret</th>
+                <th>p(up)</th>
+                <th>level</th>
+                <th>volume</th>
+              </tr>
+            </thead>
+            <tbody>
+              {n.top.map((c) => (
+                <tr key={c.s1}>
+                  <td>#{c.s1}</td>
+                  <td>
+                    <span className="pbar" style={{ width: `${Math.round(c.p * 100)}%` }} />
+                    {rate(c.p)}
+                  </td>
+                  {c.prototype ? (
+                    <>
+                      <td>{c.prototype.count}×</td>
+                      <td className={c.prototype.mean_return >= 0 ? 'up' : 'down'}>{pct(c.prototype.mean_return, 2)}</td>
+                      <td>{rate(c.prototype.p_up)}</td>
+                      <td>{describeZ(c.prototype.level, 'high', 'low')}</td>
+                      <td>{describeZ(c.prototype.volume, 'heavy', 'light')}</td>
+                    </>
+                  ) : (
+                    <td colSpan={5} className="muted">never seen in history</td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="muted small">
+            the model's distribution over the next candle's coarse token (deterministic, no sampling). columns describe
+            what each token meant historically for this ticker. token p(up) above weights those by probability, which is
+            a readout of the tokens and not the sampled forecast.
+          </p>
+        </div>
+        <div>
+          <div className="panel-title">What a token encodes</div>
+          <div className="meters">
+            {features.map(([k, v]) => (
+              <div className="meter" key={k}>
+                <span className="meter-label">{FEATURE_LABELS[k]}</span>
+                <span className="meter-track">
+                  <span className="meter-fill" style={{ width: `${v * 100}%` }} />
+                  <span className="meter-chance" style={{ left: `${sem.chance * 100}%` }} />
+                </span>
+                <span className="meter-value">{rate(v)}</span>
+              </div>
+            ))}
+          </div>
+          <p className="muted small">
+            share of each candle property explained by its coarse token, over {sem.bars} historical bars and{' '}
+            {sem.tokens_used} distinct tokens. the tick marks what chance alone would give ({rate(sem.chance)}). kronos
+            z-scores each window, so tokens mostly encode where a candle sits in the window and its volume, and much less
+            its own shape. this is one reason it tends to forecast reversion to the window average.
+          </p>
+        </div>
+      </div>
+    </>
+  )
+}
+
+function describeZ(z: number, hi: string, lo: string) {
+  if (z > 0.5) return `${hi} (${z.toFixed(1)}σ)`
+  if (z < -0.5) return `${lo} (${z.toFixed(1)}σ)`
+  return `mid (${z.toFixed(1)}σ)`
+}
+
+function StrategyReport({ s }: { s: StrategyResult }) {
+  const m = s.metrics
+  const beat = m.total_return > m.bh_return
+  const p = m.p_value
+  return (
+    <>
+      <div className="stats">
+        <Stat
+          label="return"
+          value={pct(m.total_return)}
+          hint={`buy & hold ${pct(m.bh_return)}`}
+          tone={beat ? 'up' : 'down'}
+        />
+        <Stat label="sharpe" value={m.sharpe.toFixed(2)} hint={`b&h ${m.bh_sharpe.toFixed(2)}`} tone={m.sharpe > m.bh_sharpe ? 'up' : 'down'} />
+        <Stat
+          label="max drawdown"
+          value={pct(m.max_drawdown)}
+          hint={`b&h ${pct(m.bh_max_drawdown)}`}
+          tone={m.max_drawdown > m.bh_max_drawdown ? 'up' : 'down'}
+        />
+        <Stat label="exposure" value={rate(m.exposure)} hint={`${m.trades} trades`} />
+        <Stat
+          label="win rate"
+          value={m.win_rate == null ? '—' : rate(m.win_rate)}
+          hint={`${m.active_windows} active windows`}
+        />
+        <Stat
+          label="luck test p"
+          value={p == null ? '—' : p.toFixed(2)}
+          hint={p == null ? 'needs mixed positions' : p < 0.05 ? 'timing beats random' : 'could be luck'}
+          tone={p == null ? undefined : p < 0.05 ? 'up' : 'down'}
+        />
+      </div>
+      <p className="muted small">
+        luck test: the same positions reshuffled across windows 1,000 times; p = share of shuffles that did at least as
+        well. below 0.05 suggests real timing skill. {m.active_windows < 10 && 'very few active windows, so treat any result as noise.'}
+      </p>
+    </>
   )
 }
 

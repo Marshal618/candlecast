@@ -53,6 +53,22 @@ def test_summarize_stats():
     assert s["p10"][-1] <= s["median"][-1] <= s["p90"][-1]
 
 
+def test_projected_candles_use_medoid_path_and_stay_consistent():
+    # Path 1 sits on the median; path 0 and 2 are outliers either side
+    paths = np.zeros((3, 4, len(FEATURES)))
+    for i, level in enumerate([90.0, 100.0, 115.0]):
+        paths[i, :, 0] = level - 1  # open
+        paths[i, :, 1] = level - 5  # high deliberately below open/close
+        paths[i, :, 2] = level + 5  # low deliberately above open/close
+        paths[i, :, 3] = level  # close
+    ohlc = summarize(paths, 100.0)["ohlc"]
+    assert ohlc.shape == (4, 4)
+    assert np.allclose(ohlc[:, 3], 100.0)
+    o, h, l, c = ohlc.T
+    assert (h >= np.maximum(o, c)).all()
+    assert (l <= np.minimum(o, c)).all()
+
+
 class FakeProvider(MarketDataProvider):
     calls = 0
 
@@ -106,3 +122,24 @@ def test_backtest_rejects_short_history():
             FakeForecaster(), df, lookback=100, horizon=5, windows=3, step=5,
             model="small", samples=2, temperature=1.0, top_p=0.9,
         )
+
+
+def test_r2_oos_against_zero_forecast():
+    from app.services.backtest import r2_oos
+
+    a = np.array([0.01, -0.02, 0.03])
+    assert r2_oos(a, np.zeros(3)) == 0.0
+    assert r2_oos(a, a) == 1.0
+    assert r2_oos(a, -a) < 0
+
+
+def test_ridge_trains_only_on_realized_targets():
+    from app.services.backtest import ridge_forecast
+
+    # Steady uptrend until bar 300, then a crash. A forecast made at bar 300 must not know.
+    close = np.concatenate([np.linspace(100, 200, 301), np.linspace(200, 100, 100)[1:]])
+    df = _ohlcv(pd.date_range("2026-01-01", periods=len(close), freq="1D", tz="UTC"))
+    df["close"] = close
+    df["volume"] = 1000.0 + np.arange(len(close)) % 7
+    pred = ridge_forecast(df, origin=300, horizon=10)
+    assert pred is not None and pred > 0
