@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     preload_models: str = ""
 
     cache_path: Path = BACKEND_DIR / "data" / "cache.sqlite3"
+    # Live forecast track record; kept apart from the cache so clearing one never wipes the other
+    journal_path: Path = BACKEND_DIR / "data" / "journal.sqlite3"
     # Static frontend build to serve from FastAPI (for single-container deploys)
     frontend_dist: Path = BACKEND_DIR.parent / "frontend" / "dist"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"

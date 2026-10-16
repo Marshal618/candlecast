@@ -25,6 +25,7 @@ export interface ForecastResponse {
   symbol: string
   interval: Interval
   model: ModelName
+  journal: { id: number; new: boolean }
   lookback_used: number
   last_close: number
   last_time: number
@@ -146,6 +147,60 @@ export interface TokensResponse {
   attribution: { start: number; end: number; kl_bits: number; contribution: number | null }[]
 }
 
+export interface Scorecard {
+  n: number
+  hit_rate: number
+  baseline_hit_rate: number
+  r2_oos: number
+  coverage_p10_p90: number
+  mae_pct: number
+  brier: number
+  brier_skill: number
+  p_value: number | null
+  calibration: { lo: number; hi: number; n: number; predicted: number; observed: number }[]
+}
+
+export interface JournalEntry {
+  id: number
+  created_at: number
+  symbol: string
+  interval: Interval
+  model: ModelName
+  horizon: number
+  origin_time: number
+  last_close: number
+  p_up: number
+  expected_return: number
+  actual_final: number | null
+  actual_time: number | null
+  scored_at: number | null
+  actual_return?: number
+  hit?: boolean
+}
+
+export interface JournalReport {
+  total: number
+  pending: number
+  scorecard: Scorecard | null
+  groups: {
+    symbol: string
+    interval: Interval
+    model: ModelName
+    total: number
+    live: Scorecard | null
+    backtest: {
+      horizon: number
+      windows: number
+      hit_rate: number
+      baseline_hit_rate: number
+      r2_oos: number
+      coverage: number
+      created_at: number
+    } | null
+  }[]
+  entries: JournalEntry[]
+}
+
 export interface Health {
   device: string
   loaded_models: string[]
@@ -178,6 +233,10 @@ export const api = {
     request<ForecastResponse>('/api/forecast', { method: 'POST', body: JSON.stringify(body) }),
   backtest: (body: Record<string, unknown>) =>
     request<BacktestResponse>('/api/backtest', { method: 'POST', body: JSON.stringify(body) }),
+  journal: (filters: { symbol?: string; interval?: Interval; model?: ModelName } = {}) => {
+    const q = new URLSearchParams(Object.entries(filters).filter(([, v]) => v) as [string, string][])
+    return request<JournalReport>(`/api/journal?${q}`)
+  },
   tokens: (body: Record<string, unknown>) =>
     request<TokensResponse>('/api/tokens', { method: 'POST', body: JSON.stringify(body) }),
   strategy: (body: Record<string, unknown>, signal?: AbortSignal) =>

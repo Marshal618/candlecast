@@ -522,6 +522,57 @@ button.link {
   font-variant-numeric: tabular-nums;
 }
 
+.journal-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.journal-controls .segmented {
+  width: 280px;
+}
+
+.journal-note {
+  margin: 0;
+  color: var(--accent);
+}
+
+.warn {
+  color: var(--projected);
+}
+
+.tok-table td.muted {
+  font-size: 11px;
+}
+
+.calibration {
+  width: 100%;
+  max-width: 280px;
+  display: block;
+  margin-top: 8px;
+}
+
+.cal-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.cal-diag {
+  stroke: var(--muted);
+  stroke-dasharray: 3 3;
+}
+
+.cal-dot {
+  fill: rgba(95, 179, 161, 0.35);
+  stroke: var(--accent);
+}
+
+.cal-label {
+  fill: var(--muted);
+  font-size: 9px;
+  font-family: inherit;
+}
+
 .panel-title {
   font-size: 10px;
   text-transform: uppercase;

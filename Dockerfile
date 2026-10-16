@@ -14,6 +14,7 @@ WORKDIR /app/backend
 ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/app/hf-cache \
     KD_CACHE_PATH=/app/data/cache.sqlite3 \
+    KD_JOURNAL_PATH=/app/data/journal.sqlite3 \
     KD_FRONTEND_DIST=/app/frontend/dist
 COPY backend/requirements.txt ./
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \

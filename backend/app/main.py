@@ -1,3 +1,4 @@
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
@@ -6,14 +7,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.schemas import BacktestRequest, ForecastRequest, Interval, StrategyRequest, TokensRequest
+from app.schemas import BacktestRequest, ForecastRequest, Interval, ModelName, StrategyRequest, TokensRequest
 from app.services.backtest import run_backtest
+from app.services.journal import Journal, forecast_entry
 from app.services.forecaster import MODELS, Forecaster, Timer, summarize
 from app.services.strategy import run_strategy
-from app.services.market_data import CachedMarketData, MarketDataError, YFinanceProvider, future_timestamps
+from app.services.market_data import (
+    CachedMarketData,
+    MarketDataError,
+    YFinanceProvider,
+    closed_bars,
+    future_timestamps,
+)
 
 market = CachedMarketData(YFinanceProvider(), settings.cache_path)
 forecaster = Forecaster(settings.device, settings.inference_batch_size)
+journal = Journal(settings.journal_path, market)
 
 
 @asynccontextmanager
@@ -87,38 +96,43 @@ async def forecast(req: ForecastRequest):
     s = summarize(paths[0], last_close)
     times = [int(ts.timestamp()) for ts in future]
 
+    forecast_points = [
+        {
+            "time": tm,
+            "median": float(s["median"][i]),
+            "p10": float(s["p10"][i]),
+            "p90": float(s["p90"][i]),
+            "open": float(s["ohlc"][i, 0]),
+            "high": float(s["ohlc"][i, 1]),
+            "low": float(s["ohlc"][i, 2]),
+            "close": float(s["ohlc"][i, 3]),
+        }
+        for i, tm in enumerate(times)
+    ]
+    stats = {"p_up": s["p_up"], "expected_return": s["expected_return"], "band_width_pct": s["band_width_pct"]}
+    origin_time = int(ctx.index[-1].timestamp())
+    journal_id, created = await run_in_threadpool(
+        journal.record_forecast, forecast_entry(req, last_close, origin_time, stats, forecast_points)
+    )
+
     return {
         "symbol": req.symbol.upper(),
         "interval": req.interval,
         "model": req.model,
+        "journal": {"id": journal_id, "new": created},
         "lookback_used": lookback,
         "last_close": last_close,
-        "last_time": int(ctx.index[-1].timestamp()),
+        "last_time": origin_time,
         "latency_ms": round(t.ms),
-        "stats": {
-            "p_up": s["p_up"],
-            "expected_return": s["expected_return"],
-            "band_width_pct": s["band_width_pct"],
-        },
-        "forecast": [
-            {
-                "time": tm,
-                "median": float(s["median"][i]),
-                "p10": float(s["p10"][i]),
-                "p90": float(s["p90"][i]),
-                "open": float(s["ohlc"][i, 0]),
-                "high": float(s["ohlc"][i, 1]),
-                "low": float(s["ohlc"][i, 2]),
-                "close": float(s["ohlc"][i, 3]),
-            }
-            for i, tm in enumerate(times)
-        ],
+        "stats": stats,
+        "forecast": forecast_points,
     }
 
 
 @app.post("/api/backtest")
 async def backtest(req: BacktestRequest):
-    df = await _load(req.symbol, req.interval)
+    # Score only against finished candles; today's in-progress bar would leak a moving target
+    df = closed_bars(await _load(req.symbol, req.interval), req.interval, time.time())
     _check_lookback(req.model, req.lookback, len(df))
     with Timer() as t:
         try:
@@ -139,6 +153,7 @@ async def backtest(req: BacktestRequest):
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
     strategy = run_strategy(df, result["windows"], req.horizon, **req.strategy.model_dump())
+    await run_in_threadpool(journal.record_backtest, req.symbol, req.interval, req.model, req.horizon, result["metrics"])
     return {
         "symbol": req.symbol.upper(),
         "interval": req.interval,
@@ -168,6 +183,18 @@ async def tokens(req: TokensRequest):
     with Timer() as t:
         result = await run_in_threadpool(forecaster.inspect, df.tail(lookback), df, req.model, req.segments)
     return {"symbol": req.symbol.upper(), "interval": req.interval, "model": req.model, "latency_ms": round(t.ms), **result}
+
+
+@app.get("/api/journal")
+async def journal_report(
+    symbol: str | None = Query(None, max_length=20),
+    interval: Interval | None = None,
+    model: ModelName | None = None,
+    limit: int = Query(100, ge=1, le=1000),
+):
+    """Score any forecasts whose bars have closed, then report the live track record."""
+    await run_in_threadpool(journal.score_pending)
+    return await run_in_threadpool(journal.report, symbol, interval, model, limit)
 
 
 # In production, serve the built frontend from the same origin as the API

@@ -8,6 +8,8 @@ import {
   type Interval,
   type ModelName,
   type StrategyMode,
+  type JournalReport,
+  type Scorecard,
   type StrategyResult,
   type TokensResponse,
 } from './api'
@@ -50,7 +52,9 @@ export default function App() {
   const [samples, setSamples] = useState(10)
   const [temperature, setTemperature] = useState(1.0)
   const [topP, setTopP] = useState(0.9)
-  const [tab, setTab] = useState<'forecast' | 'backtest' | 'tokens'>('forecast')
+  const [tab, setTab] = useState<'forecast' | 'backtest' | 'tokens' | 'journal'>('forecast')
+  const [journal, setJournal] = useState<JournalReport | null>(null)
+  const [journalScope, setJournalScope] = useState<'symbol' | 'all'>('all')
   const [tokens, setTokens] = useState<TokensResponse | null>(null)
   const [overlay, setOverlay] = useState<TokenOverlay>('surprisal')
 
@@ -160,6 +164,23 @@ export default function App() {
       setBusy(null)
     }
   }
+
+  const loadJournal = async () => {
+    setError(null)
+    setBusy('Scoring journal…')
+    try {
+      setJournal(await api.journal(journalScope === 'symbol' ? { symbol } : {}))
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  useEffect(() => {
+    if (tab === 'journal') loadJournal()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, journalScope, symbol])
 
   const runTokens = async () => {
     setError(null)
@@ -287,12 +308,24 @@ export default function App() {
           <button className={tab === 'tokens' ? 'active' : ''} onClick={() => setTab('tokens')}>
             Tokens
           </button>
+          <button className={tab === 'journal' ? 'active' : ''} onClick={() => setTab('journal')}>
+            Journal
+          </button>
           <span className="status">{busy ? `> ${busy}` : ''}</span>
         </div>
 
         {error && <div className="error">{error}</div>}
 
-        {tab === 'tokens' ? (
+        {tab === 'journal' ? (
+          <JournalView
+            report={journal}
+            scope={journalScope}
+            setScope={setJournalScope}
+            symbol={symbol}
+            refresh={loadJournal}
+            busy={!!busy}
+          />
+        ) : tab === 'tokens' ? (
           tokens ? (
             <TokensView t={tokens} candles={candles} overlay={overlay} setOverlay={setOverlay} interval={interval} />
           ) : (
@@ -315,6 +348,13 @@ export default function App() {
               <Stat label="band p10–p90" value={forecast ? pct(forecast.stats.band_width_pct).slice(1) : '—'} />
               <Stat label="latency" value={forecast ? `${(forecast.latency_ms / 1000).toFixed(1)}s` : '—'} />
             </div>
+            {forecast && (
+              <p className="muted small journal-note">
+                {forecast.journal.new
+                  ? `▸ logged to journal as #${forecast.journal.id}. it will be scored automatically once its ${forecast.forecast.length} bars close.`
+                  : `▸ journal already holds #${forecast.journal.id} for this bar, model and horizon. the first forecast counts, so re-runs aren't logged.`}
+              </p>
+            )}
             <PriceChart candles={candles} forecast={forecast} interval={interval} />
             <p className="legend">
               <span className="sw candle-hist" /> history
@@ -395,6 +435,226 @@ export default function App() {
         <p className="disclaimer">research tool · not financial advice · forecasts are probabilistic and often wrong</p>
       </main>
     </div>
+  )
+}
+
+const fmtDate = (t: number) =>
+  new Date(t * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+
+function JournalView({
+  report,
+  scope,
+  setScope,
+  symbol,
+  refresh,
+  busy,
+}: {
+  report: JournalReport | null
+  scope: 'symbol' | 'all'
+  setScope: (s: 'symbol' | 'all') => void
+  symbol: string
+  refresh: () => void
+  busy: boolean
+}) {
+  const controls = (
+    <div className="journal-controls">
+      <div className="segmented">
+        <button className={scope === 'all' ? 'active' : ''} onClick={() => setScope('all')}>
+          all symbols
+        </button>
+        <button className={scope === 'symbol' ? 'active' : ''} onClick={() => setScope('symbol')}>
+          {symbol} only
+        </button>
+      </div>
+      <button disabled={busy} onClick={refresh}>
+        ↻ score now
+      </button>
+    </div>
+  )
+  if (!report) return controls
+  if (report.total === 0)
+    return (
+      <>
+        {controls}
+        <div className="empty">
+          // journal is empty. every forecast you run is logged here and scored once its bars have closed. this is the
+          only test kronos can't have seen during pre-training.
+        </div>
+      </>
+    )
+
+  const sc = report.scorecard
+  return (
+    <>
+      {controls}
+      <p className="muted small">
+        {report.total} forecasts logged · {report.total - report.pending} scored · {report.pending} waiting for bars to
+        close
+      </p>
+      {sc ? (
+        <>
+          <ScorecardStats s={sc} />
+          {sc.n < 30 && (
+            <p className="muted small warn">
+              only {sc.n} scored forecasts. under ~30 these numbers are mostly noise, so keep logging before drawing
+              conclusions.
+            </p>
+          )}
+        </>
+      ) : (
+        <div className="empty">// nothing scored yet. the first results arrive when the earliest forecast's horizon closes.</div>
+      )}
+
+      <div className="token-grid">
+        <div>
+          <div className="panel-title">Live vs backtest</div>
+          <table className="tok-table">
+            <thead>
+              <tr>
+                <th>series</th>
+                <th>live n</th>
+                <th>live hit</th>
+                <th>bt hit</th>
+                <th>live r²</th>
+                <th>bt r²</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.groups.map((g) => {
+                const gap = g.live && g.backtest ? g.live.hit_rate - g.backtest.hit_rate : null
+                return (
+                  <tr key={`${g.symbol}-${g.interval}-${g.model}`}>
+                    <td>
+                      {g.symbol} · {g.interval} · {g.model}
+                    </td>
+                    <td>
+                      {g.live?.n ?? 0}/{g.total}
+                    </td>
+                    <td className={gap == null ? '' : gap < -0.1 ? 'down' : ''}>{g.live ? rate(g.live.hit_rate) : '—'}</td>
+                    <td>{g.backtest ? rate(g.backtest.hit_rate) : '—'}</td>
+                    <td>{g.live ? pct(g.live.r2_oos, 1) : '—'}</td>
+                    <td>{g.backtest ? pct(g.backtest.r2_oos, 1) : '—'}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+          <p className="muted small">
+            bt = most recent backtest for the same symbol, interval and model. if live hit rate sits well below backtest
+            (rust), the backtest was probably flattered by data kronos saw in pre-training.
+          </p>
+        </div>
+        <div>
+          <div className="panel-title">Calibration</div>
+          {sc && sc.calibration.length > 0 ? (
+            <CalibrationChart bins={sc.calibration} />
+          ) : (
+            <p className="muted small">appears once forecasts are scored.</p>
+          )}
+          <p className="muted small">
+            when kronos says p(up) = x, how often did price actually go up? dots on the diagonal = honest probabilities.
+            dot size = number of forecasts.
+          </p>
+        </div>
+      </div>
+
+      <div className="panel-title">Forecast log</div>
+      <table className="tok-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>made</th>
+            <th>from bar</th>
+            <th>series</th>
+            <th>h</th>
+            <th>p(up)</th>
+            <th>expected</th>
+            <th>actual</th>
+            <th>result</th>
+          </tr>
+        </thead>
+        <tbody>
+          {report.entries.map((e) => (
+            <tr key={e.id}>
+              <td>{e.id}</td>
+              <td>{fmtDate(e.created_at)}</td>
+              <td>{fmtDate(e.origin_time)}</td>
+              <td>
+                {e.symbol} · {e.interval} · {e.model}
+              </td>
+              <td>{e.horizon}</td>
+              <td>{rate(e.p_up)}</td>
+              <td className={e.expected_return >= 0 ? 'up' : 'down'}>{pct(e.expected_return, 2)}</td>
+              <td className={e.actual_return == null ? '' : e.actual_return >= 0 ? 'up' : 'down'}>
+                {e.actual_return == null ? '—' : pct(e.actual_return, 2)}
+              </td>
+              <td className={e.hit == null ? 'muted' : e.hit ? 'up' : 'down'}>
+                {e.hit == null ? 'pending' : e.hit ? 'hit' : 'miss'}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
+  )
+}
+
+function ScorecardStats({ s }: { s: Scorecard }) {
+  return (
+    <div className="stats">
+      <Stat label="scored" value={String(s.n)} />
+      <Stat
+        label="hit rate"
+        value={rate(s.hit_rate)}
+        hint={`baseline ${rate(s.baseline_hit_rate)}`}
+        tone={s.hit_rate > s.baseline_hit_rate ? 'up' : 'down'}
+      />
+      <Stat label="r² oos" value={pct(s.r2_oos, 1)} hint="vs zero forecast" tone={s.r2_oos > 0 ? 'up' : 'down'} />
+      <Stat label="coverage" value={rate(s.coverage_p10_p90)} hint="ideal ≈ 80%" />
+      <Stat
+        label="brier skill"
+        value={pct(s.brier_skill, 1)}
+        hint="p(up) vs coin flip"
+        tone={s.brier_skill > 0 ? 'up' : 'down'}
+      />
+      <Stat
+        label="luck test p"
+        value={s.p_value == null ? '—' : s.p_value.toFixed(2)}
+        hint={s.p_value == null ? 'needs mixed calls' : s.p_value < 0.05 ? 'beats random' : 'could be luck'}
+        tone={s.p_value == null ? undefined : s.p_value < 0.05 ? 'up' : 'down'}
+      />
+    </div>
+  )
+}
+
+function CalibrationChart({ bins }: { bins: Scorecard['calibration'] }) {
+  const size = 240
+  const pad = 28
+  const inner = size - pad * 2
+  const x = (v: number) => pad + v * inner
+  const y = (v: number) => size - pad - v * inner
+  const maxN = Math.max(...bins.map((b) => b.n))
+  return (
+    <svg className="calibration" viewBox={`0 0 ${size} ${size}`} role="img" aria-label="Calibration of P(up)">
+      {[0, 0.5, 1].map((v) => (
+        <g key={v}>
+          <line x1={x(v)} x2={x(v)} y1={y(0)} y2={y(1)} className="cal-grid" />
+          <line x1={x(0)} x2={x(1)} y1={y(v)} y2={y(v)} className="cal-grid" />
+          <text x={x(v)} y={size - 8} className="cal-label" textAnchor="middle">
+            {v * 100}%
+          </text>
+          <text x={8} y={y(v) + 3} className="cal-label">
+            {v * 100}%
+          </text>
+        </g>
+      ))}
+      <line x1={x(0)} y1={y(0)} x2={x(1)} y2={y(1)} className="cal-diag" />
+      {bins.map((b) => (
+        <circle key={b.lo} cx={x(b.predicted)} cy={y(b.observed)} r={3 + 7 * Math.sqrt(b.n / maxN)} className="cal-dot">
+          <title>{`p(up) ${rate(b.lo)}–${rate(b.hi)}: predicted ${rate(b.predicted)}, observed ${rate(b.observed)} (n=${b.n})`}</title>
+        </circle>
+      ))}
+    </svg>
   )
 }
 

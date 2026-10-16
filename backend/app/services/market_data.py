@@ -137,3 +137,15 @@ def future_timestamps(index: pd.DatetimeIndex, interval: str, n: int) -> pd.Date
 
 def _interval_delta(interval: str) -> str:
     return {"5m": "5min", "15m": "15min", "1h": "1h", "1d": "1D"}[interval]
+
+
+def interval_delta(interval: str) -> pd.Timedelta:
+    """How long one bar of `interval` lasts."""
+    return pd.Timedelta(_interval_delta(interval))
+
+
+def closed_bars(df: pd.DataFrame, interval: str, now: float) -> pd.DataFrame:
+    """Drop the last bar if its period hasn't ended yet (providers include the in-progress candle)."""
+    if len(df) and df.index[-1].timestamp() + interval_delta(interval).total_seconds() > now:
+        return df.iloc[:-1]
+    return df

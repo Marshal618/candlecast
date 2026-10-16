@@ -143,3 +143,12 @@ def test_ridge_trains_only_on_realized_targets():
     df["volume"] = 1000.0 + np.arange(len(close)) % 7
     pred = ridge_forecast(df, origin=300, horizon=10)
     assert pred is not None and pred > 0
+
+
+def test_closed_bars_drops_in_progress_candle():
+    from app.services.market_data import closed_bars
+
+    df = _ohlcv(pd.date_range("2026-01-01", periods=5, freq="1D", tz="UTC"))
+    last = df.index[-1].timestamp()
+    assert len(closed_bars(df, "1d", last + 3600)) == 4  # an hour into the last bar
+    assert len(closed_bars(df, "1d", last + 86400)) == 5  # its day has ended

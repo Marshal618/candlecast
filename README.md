@@ -17,6 +17,9 @@ the same way a language model predicts the next word.
 - **Backtest:** walk-forward forecasts from past windows scored against what actually happened,
   next to naive baselines (no-change price, majority direction), out-of-sample R², and a
   walk-forward ridge regression baseline.
+- **Forecast journal:** every forecast you run is logged and scored automatically once its bars
+  close, giving a live track record the model cannot have seen in pre-training. See
+  [Forecast journal](#forecast-journal).
 - **Token inspector:** post-hoc look at how Kronos reads the chart as tokens: per-candle surprisal,
   next-token candidates and what they historically meant, reconstruction fidelity, which candle
   properties tokens actually encode, and occlusion attribution. See [Token inspector](#token-inspector).
@@ -84,10 +87,11 @@ docker compose up --build     # single container on :8000 serving API and built 
 
 ```
 backend/
-  app/main.py                 FastAPI routes: /api/health, /api/candles, /api/forecast, /api/backtest, /api/strategy, /api/tokens
+  app/main.py                 FastAPI routes: /api/health, /api/candles, /api/forecast, /api/backtest, /api/strategy, /api/tokens, /api/journal
   app/services/market_data.py yfinance provider, SQLite cache, future-timestamp projection
   app/services/forecaster.py  Kronos loading + independent sampled paths + quantile stats
   app/services/backtest.py    walk-forward evaluation with baselines
+  app/services/journal.py     live forecast log, scoring of closed horizons, scorecard + calibration
   app/services/tokens.py      post-hoc token analysis: surprisal, next-token, semantics, attribution
   app/services/strategy.py    forecast-driven trading simulation, buy-and-hold benchmark, permutation test
   vendor/kronos/              upstream Kronos model code (MIT), see UPSTREAM_COMMIT
@@ -111,6 +115,27 @@ The Backtest tab's strategy panel answers "would trading on these forecasts have
   which re-simulates the stored P(up) values in milliseconds without touching the model.
 
 Simulation code: `backend/app/services/strategy.py`.
+
+## Forecast journal
+
+Backtests replay history, and Kronos was pre-trained on 12B+ candles that very likely include
+those same periods, so a backtest can be flattered by memory. Forecasts made today about bars
+that don't exist yet can't be. The Journal tab keeps that record:
+
+- **Logged on Run.** Each forecast is saved with its settings to `backend/data/journal.sqlite3`
+  (kept separate from the market-data cache; `KD_JOURNAL_PATH` to move it).
+- **First forecast counts.** One entry per symbol, interval, model, horizon and origin bar.
+  Re-running until the forecast looks good doesn't add entries.
+- **Scored only on closed bars.** An entry is scored once its final bar has finished, measured
+  from the close the model saw. Opening the Journal tab (or "score now") scores whatever is due.
+- **Scorecard.** Hit rate vs majority baseline, R²_OOS, p10–p90 coverage, Brier skill of P(up)
+  against a constant 50%, a permutation luck test, and a calibration chart.
+- **Live vs backtest.** Per symbol, interval and model, live results sit next to the latest
+  backtest. A live hit rate well below the backtest suggests the backtest was inflated.
+
+Expect at least ~30 scored forecasts per series before reading anything into the numbers.
+
+The backtest likewise only scores against closed candles: the in-progress bar is dropped first.
 
 ## Token inspector
 
