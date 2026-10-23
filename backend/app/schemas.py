@@ -62,3 +62,35 @@ class TokensRequest(BaseModel):
     lookback: int = Field(400, ge=32, le=2048)
     # Contiguous blocks for occlusion attribution
     segments: int = Field(16, ge=2, le=64)
+
+
+class SimCreate(BaseModel):
+    symbols: list[str] = Field(..., min_length=1, max_length=8)
+    interval: Literal["1d", "1h"] = "1d"
+    cash: float = Field(100_000, ge=1_000, le=10_000_000)
+    length: int = Field(250, ge=20, le=1000)
+    # "random" or an ISO date for the first playable bar
+    start: str = "random"
+    # Hide dates and rebase prices to 100 so you can't trade from memory of what happened
+    blind: bool = True
+    commission_bps: float = Field(2.0, ge=0, le=100)
+    slippage_bps: float = Field(5.0, ge=0, le=100)
+    bots: list[Literal["sma_cross", "kronos"]] = ["sma_cross"]
+    kronos_model: ModelName = "mini"
+
+
+class SimOrder(BaseModel):
+    symbol: str = Field(..., min_length=1, max_length=20)
+    side: Literal["buy", "sell"]
+    qty: float = Field(..., gt=0)
+    type: Literal["market", "limit", "stop"] = "market"
+    price: float | None = Field(None, gt=0)
+
+
+class SimStep(BaseModel):
+    bars: int = Field(1, ge=1, le=250)
+
+
+class SimHint(BaseModel):
+    symbol: str = Field(..., min_length=1, max_length=20)
+    horizon: int = Field(10, ge=1, le=60)

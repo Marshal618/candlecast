@@ -14,6 +14,9 @@ import {
   type TokensResponse,
 } from './api'
 import { BacktestChart, EquityChart, PriceChart, TokenChart, type TokenOverlay } from './charts'
+import { pct, rate } from './format'
+import { Slider, Stat } from './ui'
+import { SimView } from './Sim'
 import './App.css'
 
 const INTERVALS: Interval[] = ['5m', '15m', '1h', '1d']
@@ -39,8 +42,6 @@ function saveWatchlist(list: string[]) {
   }
 }
 
-const pct = (x: number, digits = 1) => `${x >= 0 ? '+' : ''}${(x * 100).toFixed(digits)}%`
-const rate = (x: number) => `${(x * 100).toFixed(0)}%`
 
 export default function App() {
   const [symbol, setSymbol] = useState('AAPL')
@@ -52,7 +53,7 @@ export default function App() {
   const [samples, setSamples] = useState(10)
   const [temperature, setTemperature] = useState(1.0)
   const [topP, setTopP] = useState(0.9)
-  const [tab, setTab] = useState<'forecast' | 'backtest' | 'tokens' | 'journal'>('forecast')
+  const [tab, setTab] = useState<'forecast' | 'backtest' | 'tokens' | 'journal' | 'sim'>('forecast')
   const [journal, setJournal] = useState<JournalReport | null>(null)
   const [journalScope, setJournalScope] = useState<'symbol' | 'all'>('all')
   const [tokens, setTokens] = useState<TokensResponse | null>(null)
@@ -311,12 +312,17 @@ export default function App() {
           <button className={tab === 'journal' ? 'active' : ''} onClick={() => setTab('journal')}>
             Journal
           </button>
+          <button className={tab === 'sim' ? 'active' : ''} onClick={() => setTab('sim')}>
+            Sim
+          </button>
           <span className="status">{busy ? `> ${busy}` : ''}</span>
         </div>
 
         {error && <div className="error">{error}</div>}
 
-        {tab === 'journal' ? (
+        {tab === 'sim' ? (
+          <SimView watchlist={watchlist} onError={setError} />
+        ) : tab === 'journal' ? (
           <JournalView
             report={journal}
             scope={journalScope}
@@ -840,40 +846,5 @@ function StrategyReport({ s }: { s: StrategyResult }) {
         well. below 0.05 suggests real timing skill. {m.active_windows < 10 && 'very few active windows, so treat any result as noise.'}
       </p>
     </>
-  )
-}
-
-function Stat({ label, value, hint, tone }: { label: string; value: string; hint?: string; tone?: 'up' | 'down' }) {
-  return (
-    <div className="stat">
-      <div className="stat-label">{label}</div>
-      <div className={`stat-value ${tone ?? ''}`}>{value}</div>
-      {hint && <div className="stat-hint">{hint}</div>}
-    </div>
-  )
-}
-
-function Slider({
-  label,
-  value,
-  min,
-  max,
-  step = 1,
-  onChange,
-}: {
-  label: string
-  value: number
-  min: number
-  max: number
-  step?: number
-  onChange: (v: number) => void
-}) {
-  return (
-    <label className="slider">
-      <span>
-        {label} <b>{value}</b>
-      </span>
-      <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} />
-    </label>
   )
 }

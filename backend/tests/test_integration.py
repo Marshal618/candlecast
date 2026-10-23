@@ -78,3 +78,19 @@ def test_backtest_reports_r2_and_ridge(client):
     m = r.json()["metrics"]
     assert m["r2_oos"] <= 1 and m["ridge_r2_oos"] <= 1
     assert 0 <= m["ridge_hit_rate"] <= 1
+
+
+def test_sim_game_with_mixed_stock_and_crypto(client):
+    r = client.post("/api/sim", json={"symbols": ["AAPL", "BTC-USD"], "interval": "1d", "length": 20,
+                                      "bots": ["sma_cross", "kronos"], "kronos_model": "mini"})
+    assert r.status_code == 200, r.text
+    s = r.json()
+    sid = s["id"]
+    assert s["period"] is None and s["kronos"] is None
+    s = client.post(f"/api/sim/{sid}/orders", json={"symbol": "BTC-USD", "side": "buy", "qty": 10, "type": "market"}).json()
+    s = client.post(f"/api/sim/{sid}/step", json={"bars": 5}).json()
+    assert s["orders"][0]["status"] == "filled"
+    assert client.post(f"/api/sim/{sid}/hint", json={"symbol": "AAPL"}).status_code == 200
+    s = client.post(f"/api/sim/{sid}/step", json={"bars": 50}).json()
+    assert s["finished"] and s["period"] is not None and s["kronos"] is not None
+    assert set(s["result"]) == {"you", "buy_hold", "sma_cross", "kronos"}

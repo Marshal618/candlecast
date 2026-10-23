@@ -201,6 +201,91 @@ export interface JournalReport {
   entries: JournalEntry[]
 }
 
+export type SimBot = 'sma_cross' | 'kronos'
+export type SimPlayer = 'you' | 'buy_hold' | SimBot
+export type OrderSide = 'buy' | 'sell'
+export type OrderType = 'market' | 'limit' | 'stop'
+
+export interface SimConfig {
+  symbols: string[]
+  interval: '1d' | '1h'
+  cash: number
+  length: number
+  start: string
+  blind: boolean
+  commission_bps: number
+  slippage_bps: number
+  bots: SimBot[]
+  kronos_model: ModelName
+}
+
+export interface SimOrder {
+  id: number
+  symbol: string
+  side: OrderSide
+  type: OrderType
+  qty: number
+  price: number | null
+  status: 'open' | 'filled' | 'cancelled' | 'rejected'
+  filled_qty?: number
+  fill_price?: number
+  reason?: string
+  placed_time: number
+  filled_time: number | null
+}
+
+export interface PlayerStats {
+  equity: number
+  trades: number
+  fees: number
+  cash: number
+  return: number
+  sharpe: number
+  max_drawdown: number
+}
+
+export interface SimState {
+  id: string
+  config: Omit<SimConfig, 'start' | 'bots'> & { bots: ('buy_hold' | SimBot)[] }
+  step: number
+  time: number
+  finished: boolean
+  hints: number
+  blind: { base: number; bar_seconds: number } | null
+  period: [number, number] | null
+  quotes: { symbol: string; last: number; change: number; traded_this_bar: boolean }[]
+  candles: Record<string, Candle[]>
+  account: {
+    cash: number
+    equity: number
+    realized: number
+    fees: number
+    trades: number
+    positions: { symbol: string; qty: number; avg_cost: number; last: number; value: number; unrealized: number; weight: number }[]
+  }
+  orders: SimOrder[]
+  curve: ({ time: number } & Partial<Record<SimPlayer, number>>)[]
+  players: Partial<Record<SimPlayer, PlayerStats>>
+  kronos: { p_up: number[]; weights: number[] } | null
+  result: Partial<Record<SimPlayer, { return: number; sharpe: number; max_drawdown: number; trades: number }>> | null
+}
+
+export interface SimSummary {
+  id: string
+  created_at: number
+  symbols: string[]
+  interval: string
+  blind: boolean
+  length: number
+  played: number
+  hints: number
+  finished: boolean
+  result: SimState['result']
+  period: [number, number] | null
+}
+
+export type SimHint = Pick<ForecastResponse, 'symbol' | 'last_close' | 'last_time' | 'stats' | 'forecast'>
+
 export interface Health {
   device: string
   loaded_models: string[]
@@ -236,6 +321,19 @@ export const api = {
   journal: (filters: { symbol?: string; interval?: Interval; model?: ModelName } = {}) => {
     const q = new URLSearchParams(Object.entries(filters).filter(([, v]) => v) as [string, string][])
     return request<JournalReport>(`/api/journal?${q}`)
+  },
+  sim: {
+    list: () => request<SimSummary[]>('/api/sim'),
+    create: (cfg: SimConfig) => request<SimState>('/api/sim', { method: 'POST', body: JSON.stringify(cfg) }),
+    get: (id: string) => request<SimState>(`/api/sim/${id}`),
+    step: (id: string, bars: number) =>
+      request<SimState>(`/api/sim/${id}/step`, { method: 'POST', body: JSON.stringify({ bars }) }),
+    order: (id: string, o: { symbol: string; side: OrderSide; qty: number; type: OrderType; price: number | null }) =>
+      request<SimState>(`/api/sim/${id}/orders`, { method: 'POST', body: JSON.stringify(o) }),
+    cancel: (id: string, orderId: number) => request<SimState>(`/api/sim/${id}/orders/${orderId}`, { method: 'DELETE' }),
+    hint: (id: string, symbol: string, horizon = 10) =>
+      request<SimHint>(`/api/sim/${id}/hint`, { method: 'POST', body: JSON.stringify({ symbol, horizon }) }),
+    finish: (id: string) => request<SimState>(`/api/sim/${id}/finish`, { method: 'POST' }),
   },
   tokens: (body: Record<string, unknown>) =>
     request<TokensResponse>('/api/tokens', { method: 'POST', body: JSON.stringify(body) }),

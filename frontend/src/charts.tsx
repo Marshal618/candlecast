@@ -8,22 +8,9 @@ import {
   type SeriesType,
   type UTCTimestamp,
 } from 'lightweight-charts'
-import type { BacktestResponse, Candle, ForecastResponse, Interval, StrategyResult, TokensResponse } from './api'
+import type { BacktestResponse, Candle, ForecastResponse, Interval, SimBot, SimPlayer, SimState, StrategyResult, TokensResponse } from './api'
+import { COLORS, PLAYER_COLORS } from './theme'
 
-const COLORS = {
-  bg: '#101418',
-  grid: '#1b2127',
-  text: '#7a858c',
-  up: '#8fb39a',
-  down: '#c0603f',
-  // Projected bars use their own hue so they can't be mistaken for real history:
-  // hollow = projected up, solid = projected down
-  projected: '#d8b45c',
-  forecast: '#d8b45c',
-  band: 'rgba(216, 180, 92, 0.45)',
-  actual: '#5fb3a1',
-  benchmark: '#7a858c',
-}
 
 const ts = (t: number) => t as UTCTimestamp
 
@@ -36,9 +23,20 @@ function removeAll(chart: IChartApi, series: ISeriesApi<SeriesType>[]) {
   }
 }
 
-function useChart(interval: Interval) {
+// Blind sim games label bars by number instead of date
+export type TimeLabel = (t: number) => string
+
+function useChart(interval: Interval | '1h', timeLabel?: TimeLabel) {
   const ref = useRef<HTMLDivElement>(null)
   const [chart, setChart] = useState<IChartApi | null>(null)
+
+  useEffect(() => {
+    if (!chart || !timeLabel) return
+    chart.applyOptions({
+      localization: { timeFormatter: (t: number) => timeLabel(t) },
+      timeScale: { tickMarkFormatter: (t: number) => timeLabel(t) },
+    })
+  }, [chart, timeLabel])
 
   useEffect(() => {
     if (!ref.current) return
@@ -73,12 +71,14 @@ export function PriceChart({
   candles,
   forecast,
   interval,
+  timeLabel,
 }: {
   candles: Candle[]
-  forecast: ForecastResponse | null
+  forecast: Pick<ForecastResponse, 'forecast' | 'last_time' | 'last_close'> | null
   interval: Interval
+  timeLabel?: TimeLabel
 }) {
-  const { ref, chart } = useChart(interval)
+  const { ref, chart } = useChart(interval, timeLabel)
 
   useEffect(() => {
     if (!chart || candles.length === 0) return
@@ -298,4 +298,35 @@ export function TokenChart({
   }, [result, candles, overlay, chart])
 
   return <div ref={ref} className="chart" />
+}
+
+
+export function RaceChart({ sim, timeLabel }: { sim: SimState; timeLabel?: TimeLabel }) {
+  const { ref, chart } = useChart(sim.config.interval, timeLabel)
+
+  useEffect(() => {
+    if (!chart) return
+    const fmt = { type: 'custom' as const, formatter: (v: number) => `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%` }
+    const players: SimPlayer[] = ['buy_hold', ...sim.config.bots.filter((b): b is SimBot => b !== 'buy_hold'), 'you']
+    const series = players.map((p) => {
+      const line = chart.addLineSeries({
+        color: PLAYER_COLORS[p],
+        lineWidth: p === 'you' ? 2 : 1,
+        priceFormat: fmt,
+        priceLineVisible: false,
+      })
+      line.setData(
+        sim.curve
+          .filter((c) => c[p] != null)
+          .map((c) => ({ time: ts(c.time), value: (c[p] as number) / sim.config.cash - 1 })),
+      )
+      return line
+    })
+    chart.timeScale().fitContent()
+    return () => {
+      removeAll(chart, series)
+    }
+  }, [sim, chart])
+
+  return <div ref={ref} className="chart chart-short" />
 }

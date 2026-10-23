@@ -7,9 +7,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.schemas import BacktestRequest, ForecastRequest, Interval, ModelName, StrategyRequest, TokensRequest
+from app.schemas import BacktestRequest, ForecastRequest, Interval, ModelName, SimCreate, SimHint, SimOrder, SimStep, StrategyRequest, TokensRequest
 from app.services.backtest import run_backtest
 from app.services.journal import Journal, forecast_entry
+from app.services.sim_session import SimError, SimStore
 from app.services.forecaster import MODELS, Forecaster, Timer, summarize
 from app.services.strategy import run_strategy
 from app.services.market_data import (
@@ -23,6 +24,7 @@ from app.services.market_data import (
 market = CachedMarketData(YFinanceProvider(), settings.cache_path)
 forecaster = Forecaster(settings.device, settings.inference_batch_size)
 journal = Journal(settings.journal_path, market)
+sims = SimStore(settings.sim_path, market, forecaster)
 
 
 @asynccontextmanager
@@ -195,6 +197,55 @@ async def journal_report(
     """Score any forecasts whose bars have closed, then report the live track record."""
     await run_in_threadpool(journal.score_pending)
     return await run_in_threadpool(journal.report, symbol, interval, model, limit)
+
+
+async def _sim(fn, *args):
+    try:
+        return await run_in_threadpool(fn, *args)
+    except SimError as e:
+        raise HTTPException(422, str(e)) from e
+    except MarketDataError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@app.get("/api/sim")
+async def sim_leaderboard():
+    return await run_in_threadpool(sims.leaderboard)
+
+
+@app.post("/api/sim")
+async def sim_create(req: SimCreate):
+    return await _sim(sims.create, req.model_dump())
+
+
+@app.get("/api/sim/{sid}")
+async def sim_state(sid: str):
+    return await _sim(sims.state, sid)
+
+
+@app.post("/api/sim/{sid}/step")
+async def sim_step(sid: str, req: SimStep):
+    return await _sim(sims.step, sid, req.bars)
+
+
+@app.post("/api/sim/{sid}/orders")
+async def sim_order(sid: str, req: SimOrder):
+    return await _sim(sims.order, sid, req.symbol, req.side, req.qty, req.type, req.price)
+
+
+@app.delete("/api/sim/{sid}/orders/{order_id}")
+async def sim_cancel(sid: str, order_id: int):
+    return await _sim(sims.cancel, sid, order_id)
+
+
+@app.post("/api/sim/{sid}/hint")
+async def sim_hint(sid: str, req: SimHint):
+    return await _sim(sims.hint, sid, req.symbol, req.horizon)
+
+
+@app.post("/api/sim/{sid}/finish")
+async def sim_finish(sid: str):
+    return await _sim(sims.finish, sid)
 
 
 # In production, serve the built frontend from the same origin as the API

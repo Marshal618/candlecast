@@ -20,6 +20,9 @@ the same way a language model predicts the next word.
 - **Forecast journal:** every forecast you run is logged and scored automatically once its bars
   close, giving a live track record the model cannot have seen in pre-training. See
   [Forecast journal](#forecast-journal).
+- **Sim (market replay game):** trade a basket of real tickers bar by bar with a pretend account
+  against buy-and-hold, an SMA crossover bot and a Kronos bot, with fees, slippage, limit and stop
+  orders. Blind mode hides dates. See [Sim](#sim-market-replay-game).
 - **Token inspector:** post-hoc look at how Kronos reads the chart as tokens: per-candle surprisal,
   next-token candidates and what they historically meant, reconstruction fidelity, which candle
   properties tokens actually encode, and occlusion attribution. See [Token inspector](#token-inspector).
@@ -87,16 +90,19 @@ docker compose up --build     # single container on :8000 serving API and built 
 
 ```
 backend/
-  app/main.py                 FastAPI routes: /api/health, /api/candles, /api/forecast, /api/backtest, /api/strategy, /api/tokens, /api/journal
+  app/main.py                 FastAPI routes: /api/health, /api/candles, /api/forecast, /api/backtest, /api/strategy, /api/tokens, /api/journal, /api/sim/*
   app/services/market_data.py yfinance provider, SQLite cache, future-timestamp projection
   app/services/forecaster.py  Kronos loading + independent sampled paths + quantile stats
   app/services/backtest.py    walk-forward evaluation with baselines
+  app/services/sim.py         market replay engine: order fills, accounts, bots, performance
+  app/services/sim_session.py game sessions, Kronos bot + hints, leaderboard
   app/services/journal.py     live forecast log, scoring of closed horizons, scorecard + calibration
   app/services/tokens.py      post-hoc token analysis: surprisal, next-token, semantics, attribution
   app/services/strategy.py    forecast-driven trading simulation, buy-and-hold benchmark, permutation test
   vendor/kronos/              upstream Kronos model code (MIT), see UPSTREAM_COMMIT
 frontend/
   src/App.tsx                 dashboard UI
+  src/Sim.tsx                 market replay game UI
   src/charts.tsx              lightweight-charts candle/forecast/backtest charts
 ```
 
@@ -136,6 +142,35 @@ that don't exist yet can't be. The Journal tab keeps that record:
 Expect at least ~30 scored forecasts per series before reading anything into the numbers.
 
 The backtest likewise only scores against closed candles: the in-progress bar is dropped first.
+
+## Sim: market replay game
+
+The Sim tab replays real history as a game. Pick a basket (up to 8 tickers, stocks and crypto can
+be mixed), starting cash, length and costs, then step forward bar by bar or auto-play.
+
+**Rules (a plain cash brokerage account):**
+
+- You only see bars up to now. The game runs on the server, so future bars never reach the browser.
+- Orders placed now are worked from the next bar. Market orders fill at the next open; limits fill
+  when price trades through them (at the limit, or better on a gap); stops trigger the same way
+  and fill like market orders. Market and stop fills pay slippage; every fill pays commission.
+- Long only. Buys without enough cash are rejected; sells are capped at what you hold.
+
+**Opponents** play by the same rules with the same cash: buy-and-hold (equal weight, the benchmark),
+an SMA 20/50 crossover, and a Kronos bot that re-forecasts every 5 bars and holds what it rates at
+P(up) ≥ 60%. You can ask Kronos for a hint from the bars visible now; hints are counted. The bot's
+own readings stay hidden until the game ends, since they'd be free hints.
+
+**Blind mode** (on by default) picks a random start, hides dates and rebases every price to 100, so
+you can't trade on memory of what happened next. The real period is revealed when you finish.
+
+Finished games go on a leaderboard with your return, buy-and-hold, the best bot and hints used.
+Sessions live in `backend/data/sim.sqlite3` (`KD_SIM_PATH`) as config + frozen market snapshot +
+action log; every view replays the log, so games are deterministic and survive restarts.
+
+Caveats: prices are yfinance's dividend- and split-adjusted series; there's no shorting, margin,
+partial fills or market impact. Daily bars from different exchanges are aligned on calendar date,
+and hourly bars on the UTC hour.
 
 ## Token inspector
 

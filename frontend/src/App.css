@@ -573,6 +573,195 @@ button.link {
   font-family: inherit;
 }
 
+/* ── sim ──────────────────────────────────────────── */
+.progress {
+  height: 2px;
+  background: var(--border);
+}
+
+.progress span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s;
+}
+
+.sim-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.sim-controls .status {
+  margin-left: 4px;
+}
+
+.sim-controls .right {
+  margin-left: auto;
+}
+
+.sim-controls button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.speed {
+  width: 210px;
+}
+
+.quote-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.quote-tabs button {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.quote-tabs button.active {
+  border-color: var(--accent);
+}
+
+.quote-tabs .up,
+.hint-row .up {
+  color: var(--up);
+}
+
+.quote-tabs .down,
+.hint-row .down {
+  color: var(--down);
+}
+
+.sim-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 250px;
+  gap: 12px;
+}
+
+.sim-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.hint-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.ticket {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--border);
+  padding: 10px 12px;
+  align-self: start;
+}
+
+.ticket .panel-title {
+  border-top: none;
+  padding-top: 0;
+  margin-top: 0;
+}
+
+.ticket .segmented button.active.buy {
+  border-color: var(--up);
+  color: var(--up);
+}
+
+.ticket .segmented button.active.sell {
+  border-color: var(--down);
+  color: var(--down);
+}
+
+.field {
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  padding: 6px 8px;
+  outline: none;
+  font-variant-numeric: tabular-nums;
+  width: 100%;
+  color-scheme: dark;
+}
+
+.field:focus {
+  border-color: var(--accent);
+}
+
+.quick {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.quick button {
+  font-size: 11px;
+  padding: 3px 0;
+}
+
+.pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.sim-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.setup-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px 20px;
+}
+
+.sim-setup .start {
+  align-self: flex-start;
+  padding: 8px 18px;
+}
+
+.results {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  border: 1px solid var(--accent-dim);
+  border-left: 3px solid var(--accent);
+  padding: 12px 14px;
+}
+
+.results-title {
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.standings tr.me td {
+  color: var(--text);
+  background: var(--panel);
+}
+
+.tok-table td.warn {
+  color: var(--projected);
+}
+
+@media (max-width: 800px) {
+  .sim-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .panel-title {
   font-size: 10px;
   text-transform: uppercase;
