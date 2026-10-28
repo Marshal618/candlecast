@@ -1,5 +1,8 @@
 export type Interval = '5m' | '15m' | '1h' | '1d'
-export type ModelName = 'mini' | 'small' | 'base'
+export type KronosName = 'mini' | 'small' | 'base'
+// Challengers that every Kronos result can be compared against (backend/app/services/challengers.py)
+export type Challenger = 'naive' | 'garch' | 'chronos'
+export type ModelName = KronosName | Challenger
 
 export interface Candle {
   time: number
@@ -233,7 +236,7 @@ export interface SimConfig {
   commission_bps: number
   slippage_bps: number
   bots: SimBot[]
-  kronos_model: ModelName
+  kronos_model: KronosName
 }
 
 export interface SimOrder {

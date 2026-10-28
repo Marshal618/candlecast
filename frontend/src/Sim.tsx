@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   api,
-  type ModelName,
+  type KronosName,
   type OrderSide,
   type OrderType,
   type SimBot,
@@ -519,7 +519,7 @@ function SimSetup({
   const [commission, setCommission] = useState('2')
   const [slippage, setSlippage] = useState('5')
   const [bots, setBots] = useState<SimBot[]>(['sma_cross', 'kronos'])
-  const [model, setModel] = useState<ModelName>('mini')
+  const [model, setModel] = useState<KronosName>('mini')
 
   const toggleBot = (b: SimBot) => setBots((cur) => (cur.includes(b) ? cur.filter((x) => x !== b) : [...cur, b]))
 
@@ -601,7 +601,7 @@ function SimSetup({
         <label>
           kronos model (bot + hints)
           <div className="segmented">
-            {(['mini', 'small', 'base'] as ModelName[]).map((m) => (
+            {(['mini', 'small', 'base'] as KronosName[]).map((m) => (
               <button key={m} className={model === m ? 'active' : ''} onClick={() => setModel(m)}>
                 {m}
               </button>

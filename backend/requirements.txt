@@ -9,6 +9,11 @@ einops==0.8.1
 huggingface_hub>=0.33,<1.0
 safetensors>=0.4
 tqdm
+# Challenger models to compare Kronos against
+arch>=7
+chronos-forecasting>=2.0,<3
+# scipy 1.15 wheels fail to load on macOS 27 (dlopen __thread_bss error); 1.14 works everywhere
+scipy>=1.11,<1.15
 
 # dev
 pytest>=8

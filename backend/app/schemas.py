@@ -3,7 +3,9 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 Interval = Literal["5m", "15m", "1h", "1d"]
-ModelName = Literal["mini", "small", "base"]
+KronosName = Literal["mini", "small", "base"]
+# Kronos sizes plus challengers to compare it against (see services/challengers.py)
+ModelName = Literal["mini", "small", "base", "naive", "garch", "chronos"]
 
 
 class SamplingParams(BaseModel):
@@ -56,7 +58,7 @@ class StrategyRequest(BaseModel):
 
 
 class TokensRequest(BaseModel):
-    model: ModelName = "small"
+    model: KronosName = "small"
     symbol: str = Field(..., min_length=1, max_length=20)
     interval: Interval = "1d"
     lookback: int = Field(400, ge=32, le=2048)
@@ -76,7 +78,7 @@ class SimCreate(BaseModel):
     commission_bps: float = Field(2.0, ge=0, le=100)
     slippage_bps: float = Field(5.0, ge=0, le=100)
     bots: list[Literal["sma_cross", "kronos"]] = ["sma_cross"]
-    kronos_model: ModelName = "mini"
+    kronos_model: KronosName = "mini"
 
 
 class SimOrder(BaseModel):

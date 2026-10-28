@@ -105,3 +105,20 @@ def test_backtest_calibration_applies_only_to_matching_forecast_settings(client)
     assert f["forecast"][-1]["cal_p10"] <= f["forecast"][-1]["cal_p90"]
     other = client.post("/api/forecast", json={**base, "samples": 8}).json()
     assert other["calibration"] is None and other["calibration_mismatch"] is True
+
+
+@pytest.mark.parametrize("model", ["naive", "garch", "chronos"])
+def test_challenger_forecast_and_backtest(client, model):
+    base = {"symbol": "SPY", "interval": "1d", "model": model, "lookback": 256, "horizon": 5, "samples": 8}
+    f = client.post("/api/forecast", json=base)
+    assert f.status_code == 200, f.text
+    body = f.json()
+    assert len(body["forecast"]) == 5 and 0 <= body["stats"]["p_up"] <= 1
+    assert all(p["p10"] <= p["median"] <= p["p90"] for p in body["forecast"])
+    b = client.post("/api/backtest", json={**base, "windows": 8}).json()
+    assert b["metrics"]["windows"] == 8 and b["calibration"] is not None
+
+
+def test_tokens_rejects_challengers(client):
+    r = client.post("/api/tokens", json={"symbol": "SPY", "interval": "1d", "model": "garch"})
+    assert r.status_code == 422

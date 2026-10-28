@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   api,
   type BacktestResponse,
@@ -7,6 +7,8 @@ import {
   type ForecastResponse,
   type Health,
   type Interval,
+  type Challenger,
+  type KronosName,
   type ModelName,
   type StrategyMode,
   type JournalReport,
@@ -16,12 +18,14 @@ import {
 } from './api'
 import { BacktestChart, EquityChart, PriceChart, TokenChart, type TokenOverlay } from './charts'
 import { pct, rate } from './format'
+import { MODEL_COLORS, MODEL_LABELS } from './theme'
 import { Slider, Stat } from './ui'
 import { SimView } from './Sim'
 import './App.css'
 
 const INTERVALS: Interval[] = ['5m', '15m', '1h', '1d']
-const MODELS: ModelName[] = ['mini', 'small', 'base']
+const MODELS: KronosName[] = ['mini', 'small', 'base']
+const CHALLENGERS: Challenger[] = ['naive', 'garch', 'chronos']
 const DEFAULT_WATCHLIST = ['AAPL', 'NVDA', 'SPY', 'BTC-USD', 'ETH-USD']
 const WATCHLIST_KEY = 'kd.watchlist'
 
@@ -48,7 +52,10 @@ export default function App() {
   const [symbol, setSymbol] = useState('AAPL')
   const [input, setInput] = useState('AAPL')
   const [interval, setBarInterval] = useState<Interval>('1d')
-  const [model, setModel] = useState<ModelName>('small')
+  const [model, setModel] = useState<KronosName>('small')
+  const [rivals, setRivals] = useState<Challenger[]>(CHALLENGERS)
+  const [cmpForecasts, setCmpForecasts] = useState<Partial<Record<ModelName, ForecastResponse>> | null>(null)
+  const [cmpBacktests, setCmpBacktests] = useState<Partial<Record<ModelName, BacktestResponse>> | null>(null)
   const [horizon, setHorizon] = useState(20)
   const [lookback, setLookback] = useState(400)
   const [samples, setSamples] = useState(10)
@@ -87,6 +94,8 @@ export default function App() {
     let cancelled = false
     setForecast(null)
     setBacktest(null)
+    setCmpForecasts(null)
+    setCmpBacktests(null)
     setStrategy(null)
     setTokens(null)
     setError(null)
@@ -132,6 +141,51 @@ export default function App() {
       ctrl.abort()
     }
   }, [backtest, mode, enterP, costBps])
+
+  const toggleRival = (m: Challenger) =>
+    setRivals((cur) => (cur.includes(m) ? cur.filter((x) => x !== m) : CHALLENGERS.filter((x) => x === m || cur.includes(x))))
+
+  // Same symbol, bars, lookback, horizon and sampling for every model, so the comparison is like for like
+  const compare = async (kind: 'forecast' | 'backtest') => {
+    setError(null)
+    const models: ModelName[] = [model, ...rivals]
+    const out: Partial<Record<ModelName, ForecastResponse | BacktestResponse>> = {}
+    try {
+      for (const [i, m] of models.entries()) {
+        setBusy(`${kind === 'forecast' ? 'Forecasting' : 'Backtesting'} ${MODEL_LABELS[m]} (${i + 1}/${models.length})…`)
+        out[m] =
+          kind === 'forecast'
+            ? await api.forecast({ ...params, model: m, horizon })
+            : await api.backtest({ ...params, model: m, horizon, windows: btWindows, samples, strategy: strategyParams })
+      }
+      if (kind === 'forecast') {
+        setCmpForecasts(out as Record<ModelName, ForecastResponse>)
+        setForecast(out[model] as ForecastResponse)
+        setTab('forecast')
+      } else {
+        const bt = out as Record<ModelName, BacktestResponse>
+        setCmpBacktests(bt)
+        setStrategy(bt[model].strategy)
+        setBacktest(bt[model])
+        setTab('backtest')
+      }
+      api.health().then(setHealth).catch(() => {})
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const overlays = useMemo(
+    () =>
+      cmpForecasts
+        ? rivals
+            .filter((m) => cmpForecasts[m])
+            .map((m) => ({ name: m, color: MODEL_COLORS[m], forecast: cmpForecasts[m] as ForecastResponse }))
+        : [],
+    [cmpForecasts, rivals],
+  )
 
   const runForecast = async () => {
     setError(null)
@@ -300,6 +354,27 @@ export default function App() {
             Inspect tokens
           </button>
         </div>
+
+        <div className="section-title">Compare</div>
+        <div className="rivals">
+          {CHALLENGERS.map((m) => (
+            <button key={m} className={rivals.includes(m) ? 'active' : ''} onClick={() => toggleRival(m)}>
+              <i className="dot" style={{ background: MODEL_COLORS[m] }} />
+              {m}
+            </button>
+          ))}
+        </div>
+        <div className="actions">
+          <button disabled={!!busy || candles.length === 0 || rivals.length === 0} onClick={() => compare('forecast')}>
+            forecasts
+          </button>
+          <button disabled={!!busy || candles.length === 0 || rivals.length === 0} onClick={() => compare('backtest')}>
+            backtests
+          </button>
+        </div>
+        <p className="muted small">
+          kronos-{model} vs the selected models on the same bars and settings. chronos downloads ~200MB on first use.
+        </p>
       </aside>
 
       <main className="main">
@@ -379,12 +454,17 @@ export default function App() {
                   : `▸ journal already holds #${forecast.journal.id} for this bar, model and horizon. the first forecast counts, so re-runs aren't logged.`}
               </p>
             )}
-            <PriceChart candles={candles} forecast={forecast} interval={interval} />
+            <PriceChart candles={candles} forecast={forecast} interval={interval} overlays={overlays} />
             <p className="legend">
               <span className="sw candle-hist" /> history
               <span className="sw candle-proj" /> projected (hollow up / solid down)
               <span className="sw median" /> median
               <span className="sw band" /> raw p10–p90
+              {overlays.map((o) => (
+                <span key={o.name}>
+                  <span className="sw" style={{ background: o.color }} /> {o.name}
+                </span>
+              ))}
               {forecast?.calibration && (
                 <>
                   <span className="sw cal" /> calibrated p10–p90 (backtest coverage {rate(forecast.calibration.raw_coverage)} →{' '}
@@ -392,6 +472,7 @@ export default function App() {
                 </>
               )}
             </p>
+            {cmpForecasts && <ForecastLeague results={cmpForecasts} />}
             {forecast && !forecast.calibration && (
               <p className="muted small">
                 {forecast.calibration_mismatch
@@ -430,6 +511,7 @@ export default function App() {
               <Stat label="windows" value={String(backtest.metrics.windows)} />
               <Stat label="latency" value={`${(backtest.latency_ms / 1000).toFixed(1)}s`} />
             </div>
+            {cmpBacktests && <BacktestLeague results={cmpBacktests} />}
             {backtest.calibration && <CalibrationNote c={backtest.calibration} />}
             <BacktestChart result={backtest} interval={interval} />
             <p className="legend">
@@ -701,6 +783,89 @@ function CalibrationChart({ bins }: { bins: Scorecard['calibration'] }) {
         </circle>
       ))}
     </svg>
+  )
+}
+
+function ForecastLeague({ results }: { results: Partial<Record<ModelName, ForecastResponse>> }) {
+  const rows = Object.entries(results) as [ModelName, ForecastResponse][]
+  return (
+    <table className="tok-table league">
+      <thead>
+        <tr>
+          <th>model</th>
+          <th>p(up)</th>
+          <th>median move</th>
+          <th>band p10–p90</th>
+          <th>latency</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(([m, f]) => (
+          <tr key={m}>
+            <td>
+              <i className="dot" style={{ background: MODEL_COLORS[m] }} /> {MODEL_LABELS[m]}
+            </td>
+            <td className={f.stats.p_up >= 0.5 ? 'up' : 'down'}>{rate(f.stats.p_up)}</td>
+            <td className={f.stats.expected_return >= 0 ? 'up' : 'down'}>{pct(f.stats.expected_return, 2)}</td>
+            <td>
+              {pct(f.stats.band_width_cal_pct ?? f.stats.band_width_pct).slice(1)}
+              <span className="muted"> {f.stats.band_width_cal_pct != null ? 'cal' : 'raw'}</span>
+            </td>
+            <td>{(f.latency_ms / 1000).toFixed(1)}s</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+function BacktestLeague({ results }: { results: Partial<Record<ModelName, BacktestResponse>> }) {
+  const rows = (Object.entries(results) as [ModelName, BacktestResponse][]).sort(
+    (a, b) => b[1].metrics.r2_oos - a[1].metrics.r2_oos,
+  )
+  const first = rows[0]?.[1]
+  return (
+    <>
+      <div className="panel-title">Model comparison</div>
+      <table className="tok-table league">
+        <thead>
+          <tr>
+            <th>model</th>
+            <th>hit rate</th>
+            <th>r² oos</th>
+            <th>mae</th>
+            <th>coverage raw → cal</th>
+            <th>latency</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([m, b]) => {
+            const k = b.metrics
+            return (
+              <tr key={m}>
+                <td>
+                  <i className="dot" style={{ background: MODEL_COLORS[m] }} /> {MODEL_LABELS[m]}
+                </td>
+                <td className={k.hit_rate > k.baseline_hit_rate ? 'up' : 'down'}>{rate(k.hit_rate)}</td>
+                <td className={k.r2_oos > 0 ? 'up' : 'down'}>{pct(k.r2_oos, 1)}</td>
+                <td className={k.mae_pct < k.naive_mae_pct ? 'up' : 'down'}>{pct(k.mae_pct, 2).slice(1)}</td>
+                <td>
+                  {rate(k.coverage_p10_p90)} → {b.calibration ? rate(b.calibration.calibrated_coverage) : '—'}
+                </td>
+                <td>{(b.latency_ms / 1000).toFixed(1)}s</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+      {first && (
+        <p className="muted small">
+          same {first.metrics.windows} walk-forward windows for every model, sorted by r² oos. green = beats its yardstick
+          (hit rate vs the {rate(first.metrics.baseline_hit_rate)} majority baseline, r² vs predicting zero, mae vs
+          no-change). each run also saves its own calibration and shows up per model in the journal.
+        </p>
+      )}
+    </>
   )
 }
 

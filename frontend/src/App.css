@@ -692,7 +692,45 @@ button.link {
   align-self: start;
 }
 
-.ticket .panel-title {
+.ticket .rivals {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.rivals button {
+  font-size: 11px;
+  padding: 4px 2px;
+  white-space: nowrap;
+}
+
+.rivals .dot {
+  margin-right: 4px;
+}
+
+.rivals button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+
+.league td.up {
+  color: var(--up);
+}
+
+.league td.down {
+  color: var(--down);
+}
+
+.panel-title {
   border-top: none;
   padding-top: 0;
   margin-top: 0;

@@ -18,7 +18,7 @@ from app.config import BACKEND_DIR, settings
 sys.path.insert(0, str(BACKEND_DIR / "vendor" / "kronos"))
 from model import Kronos, KronosPredictor, KronosTokenizer  # noqa: E402
 
-from app.services import tokens  # noqa: E402  (needs the vendor path above)
+from app.services import challengers, tokens  # noqa: E402  (tokens needs the vendor path above)
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,12 @@ MODELS: dict[str, ModelSpec] = {
 }
 
 FEATURES = ["open", "high", "low", "close", "volume", "amount"]
+
+# Every model the app can forecast with, Kronos sizes plus challengers, and its max lookback
+MAX_CONTEXT: dict[str, int] = {
+    **{k: v.max_context for k, v in MODELS.items()},
+    **{k: challengers.MAX_CONTEXT for k in challengers.CHALLENGERS},
+}
 
 
 def resolve_device(device: str) -> str:
@@ -54,12 +60,13 @@ class Forecaster:
         self.device = resolve_device(device)
         self.batch_size = batch_size
         self._predictors: dict[str, KronosPredictor] = {}
+        self._chronos = challengers.ChronosModel(self.device)
         # Loading and torch inference are not safe to run concurrently on one device
         self._lock = threading.Lock()
 
     @property
     def loaded_models(self) -> list[str]:
-        return list(self._predictors)
+        return list(self._predictors) + (["chronos"] if self._chronos.loaded else [])
 
     def _predictor(self, name: str) -> KronosPredictor:
         if name not in MODELS:
@@ -77,7 +84,10 @@ class Forecaster:
 
     def load(self, name: str) -> None:
         with self._lock:
-            self._predictor(name)
+            if name == "chronos":
+                self._chronos.load()
+            elif name not in challengers.CHALLENGERS:
+                self._predictor(name)
 
     def sample_paths(
         self,
@@ -94,6 +104,9 @@ class Forecaster:
         Returns array of shape (len(contexts), samples, horizon, 6) in FEATURES order.
         """
         horizon = len(future_index[0])
+        if model in challengers.CHALLENGERS:
+            with self._lock:
+                return challengers.sample_paths(contexts, horizon, model, samples, self._chronos)
         # Each (context, sample) pair becomes its own batch row
         jobs = [(i, ctx, fut) for i, (ctx, fut) in enumerate(zip(contexts, future_index)) for _ in range(samples)]
         out = np.empty((len(contexts), samples, horizon, len(FEATURES)), dtype=np.float64)

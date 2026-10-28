@@ -17,6 +17,9 @@ the same way a language model predicts the next word.
 - **Backtest:** walk-forward forecasts from past windows scored against what actually happened,
   next to naive baselines (no-change price, majority direction), out-of-sample R², and a
   walk-forward ridge regression baseline.
+- **Model comparison:** run the same forecast or backtest with three challengers (a naive
+  benchmark, GARCH, and Amazon's Chronos-Bolt foundation model) to see whether Kronos actually
+  adds anything. See [Comparing models](#comparing-models).
 - **Calibrated bands:** Kronos's raw p10–p90 bands are far too narrow (20–55% real coverage in
   our tests). Backtests conformally calibrate them, and live forecasts show the corrected band.
   See [Band calibration](#band-calibration).
@@ -96,6 +99,7 @@ backend/
   app/main.py                 FastAPI routes: /api/health, /api/candles, /api/forecast, /api/backtest, /api/strategy, /api/tokens, /api/journal, /api/sim/*
   app/services/market_data.py yfinance provider, SQLite cache, future-timestamp projection
   app/services/forecaster.py  Kronos loading + independent sampled paths + quantile stats
+  app/services/challengers.py naive / GARCH / Chronos-Bolt forecasters for comparison
   app/services/calibration.py conformal (CQR) calibration of forecast bands
   app/services/backtest.py    walk-forward evaluation with baselines
   app/services/sim.py         market replay engine: order fills, accounts, bots, performance
@@ -125,6 +129,28 @@ The Backtest tab's strategy panel answers "would trading on these forecasts have
   which re-simulates the stored P(up) values in milliseconds without touching the model.
 
 Simulation code: `backend/app/services/strategy.py`.
+
+## Comparing models
+
+A forecast only means something next to alternatives. The sidebar's **Compare** section runs the
+selected challengers on exactly the same bars, lookback, horizon and sample count as Kronos:
+
+| Model | What it is | What it tests |
+|---|---|---|
+| `naive` | Historical average drift + 5-bar block-bootstrapped past returns | The no-skill yardstick (Goyal & Welch 2008). A model that can't beat it has no signal. |
+| `garch` | GARCH(1,1) with Student-t shocks, simulated forward (`arch` package) | The econometrics standard for volatility, i.e. band width. |
+| `chronos` | Amazon Chronos-Bolt small, zero-shot on closes | A general time-series foundation model, the kind Kronos's paper claims to beat. |
+
+**Forecasts** overlays each model's median and band on the chart with a side-by-side table.
+**Backtests** gives a league table on identical walk-forward windows: hit rate vs the majority
+baseline, R²_OOS vs predicting zero, MAE vs no-change, and band coverage raw → calibrated.
+
+Every challenger produces sampled paths in Kronos's format, so it gets the full pipeline: band
+calibration, the journal (live results group by model), and the scorecard. They model the close
+only, so they draw lines and bands rather than candles. Chronos-Bolt outputs quantiles 0.1–0.9,
+not samples; its paths are drawn at fixed quantile levels, so tails beyond p10/p90 are clamped.
+
+The token inspector and the Sim's Kronos bot remain Kronos-only.
 
 ## Band calibration
 

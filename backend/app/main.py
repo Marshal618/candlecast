@@ -12,7 +12,7 @@ from app.services import calibration
 from app.services.backtest import run_backtest
 from app.services.journal import Journal, forecast_entry
 from app.services.sim_session import SimError, SimStore
-from app.services.forecaster import MODELS, Forecaster, Timer, summarize
+from app.services.forecaster import MAX_CONTEXT, Forecaster, Timer, summarize
 from app.services.strategy import run_strategy
 from app.services.market_data import (
     CachedMarketData,
@@ -59,7 +59,7 @@ async def _load(symbol: str, interval: str):
 
 
 def _check_lookback(model: str, lookback: int, available: int) -> int:
-    max_ctx = MODELS[model].max_context
+    max_ctx = MAX_CONTEXT[model]
     if lookback > max_ctx:
         raise HTTPException(422, f"lookback {lookback} exceeds {model}'s max context of {max_ctx}.")
     return min(lookback, available)
@@ -76,7 +76,7 @@ def health():
         "status": "ok",
         "device": forecaster.device,
         "loaded_models": forecaster.loaded_models,
-        "models": {k: {"max_context": v.max_context} for k, v in MODELS.items()},
+        "models": {k: {"max_context": v} for k, v in MAX_CONTEXT.items()},
         "default_model": settings.default_model,
     }
 

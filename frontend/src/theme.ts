@@ -1,4 +1,4 @@
-import type { SimPlayer } from './api'
+import type { ModelName, SimPlayer } from './api'
 
 export const COLORS = {
   bg: '#101418',
@@ -21,4 +21,23 @@ export const PLAYER_COLORS: Record<SimPlayer, string> = {
   buy_hold: COLORS.benchmark,
   sma_cross: '#8fa8d8',
   kronos: COLORS.projected,
+}
+
+// Kronos sizes share the brass of the projected candles; each challenger gets its own hue
+export const MODEL_COLORS: Record<ModelName, string> = {
+  mini: COLORS.projected,
+  small: COLORS.projected,
+  base: COLORS.projected,
+  naive: '#9aa4ab',
+  garch: '#8fa8d8',
+  chronos: '#c28fd6',
+}
+
+export const MODEL_LABELS: Record<ModelName, string> = {
+  mini: 'kronos-mini',
+  small: 'kronos-small',
+  base: 'kronos-base',
+  naive: 'naive (hist. avg + bootstrap)',
+  garch: 'garch(1,1)-t',
+  chronos: 'chronos-bolt',
 }

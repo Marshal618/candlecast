@@ -67,16 +67,30 @@ function useChart(interval: Interval | '1h', timeLabel?: TimeLabel) {
   return { ref, chart }
 }
 
+type ForecastLike = Pick<ForecastResponse, 'forecast' | 'last_time' | 'last_close'>
+
+export interface Overlay {
+  name: string
+  color: string
+  forecast: ForecastLike
+}
+
+// Stable default so the chart effect doesn't rebuild (and reset zoom) on every parent render
+const NO_OVERLAYS: Overlay[] = []
+
 export function PriceChart({
   candles,
   forecast,
   interval,
   timeLabel,
+  overlays = NO_OVERLAYS,
 }: {
   candles: Candle[]
-  forecast: Pick<ForecastResponse, 'forecast' | 'last_time' | 'last_close'> | null
+  forecast: ForecastLike | null
   interval: Interval
   timeLabel?: TimeLabel
+  // Challenger forecasts drawn as a median line and band in their own colour
+  overlays?: Overlay[]
 }) {
   const { ref, chart } = useChart(interval, timeLabel)
 
@@ -158,6 +172,26 @@ export function PriceChart({
       ])
     }
 
+    for (const o of overlays) {
+      const anchor = { time: ts(o.forecast.last_time), value: o.forecast.last_close }
+      const pts = o.forecast.forecast
+      const calibrated = pts[0]?.cal_p10 != null
+      const series = (pick: (p: ForecastLike['forecast'][number]) => number, style: LineStyle, width: 1 | 2) => {
+        const line = chart.addLineSeries({
+          color: o.color,
+          lineWidth: width,
+          lineStyle: style,
+          lastValueVisible: false,
+          priceLineVisible: false,
+        })
+        line.setData([anchor, ...pts.map((p) => ({ time: ts(p.time), value: pick(p) }))])
+        added.push(line)
+      }
+      series((p) => p.median, LineStyle.Solid, 2)
+      series((p) => (calibrated ? (p.cal_p10 as number) : p.p10), LineStyle.Dotted, 1)
+      series((p) => (calibrated ? (p.cal_p90 as number) : p.p90), LineStyle.Dotted, 1)
+    }
+
     // Show recent history plus the full forecast
     const total = candles.length + (forecast?.forecast.length ?? 0)
     chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, total - 180), to: total + 4 })
@@ -165,7 +199,7 @@ export function PriceChart({
     return () => {
       removeAll(chart, added)
     }
-  }, [candles, forecast, chart])
+  }, [candles, forecast, overlays, chart])
 
   return <div ref={ref} className="chart" />
 }
