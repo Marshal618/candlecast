@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+import torch
 
 from app.config import BACKEND_DIR, settings
 
@@ -34,6 +35,7 @@ MODELS: dict[str, ModelSpec] = {
     "base": ModelSpec("NeoQuasar/Kronos-base", "NeoQuasar/Kronos-Tokenizer-base", 512),
 }
 
+SEED = 0
 FEATURES = ["open", "high", "low", "close", "volume", "amount"]
 
 # Every model the app can forecast with, Kronos sizes plus challengers, and its max lookback
@@ -114,6 +116,8 @@ class Forecaster:
 
         with self._lock:
             predictor = self._predictor(model)
+            # Fixed seed: identical inputs give identical paths, so backtests and research reproduce
+            torch.manual_seed(SEED)
             for start in range(0, len(jobs), self.batch_size):
                 chunk = jobs[start : start + self.batch_size]
                 preds = predictor.predict_batch(

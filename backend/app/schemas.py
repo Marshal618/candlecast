@@ -18,7 +18,7 @@ class SamplingParams(BaseModel):
 class ForecastRequest(SamplingParams):
     symbol: str = Field(..., min_length=1, max_length=20)
     interval: Interval = "1d"
-    lookback: int = Field(400, ge=32, le=2048)
+    lookback: int = Field(64, ge=32, le=2048)
     horizon: int = Field(20, ge=1, le=120)
 
 
@@ -33,7 +33,7 @@ class StrategyParams(BaseModel):
 class BacktestRequest(SamplingParams):
     symbol: str = Field(..., min_length=1, max_length=20)
     interval: Interval = "1d"
-    lookback: int = Field(400, ge=32, le=2048)
+    lookback: int = Field(64, ge=32, le=2048)
     horizon: int = Field(10, ge=1, le=120)
     windows: int = Field(20, ge=1, le=40)
     # Bars between window origins; defaults to horizon (non-overlapping)
@@ -61,9 +61,26 @@ class TokensRequest(BaseModel):
     model: KronosName = "small"
     symbol: str = Field(..., min_length=1, max_length=20)
     interval: Interval = "1d"
-    lookback: int = Field(400, ge=32, le=2048)
+    lookback: int = Field(64, ge=32, le=2048)
     # Contiguous blocks for occlusion attribution
     segments: int = Field(16, ge=2, le=64)
+
+
+class CrossSectionRequest(BaseModel):
+    """Rank a universe each rebalance date by every model's forecast (see services/crosssection.py)."""
+
+    symbols: list[str] = Field(..., min_length=4, max_length=30)
+    interval: Literal["1d", "1h"] = "1d"
+    models: list[ModelName] = Field(["mini", "naive"], min_length=1, max_length=6)
+    lookback: int = Field(64, ge=32, le=2048)
+    # Bars between rebalances, and the forward return each ranking is scored on
+    horizon: int = Field(5, ge=1, le=60)
+    periods: int = Field(24, ge=4, le=60)
+    buckets: int = Field(3, ge=2, le=10)
+    samples: int = Field(8, ge=1, le=50)
+    temperature: float = Field(1.0, gt=0, le=2.0)
+    top_p: float = Field(0.9, gt=0, le=1.0)
+    cost_bps: float = Field(5.0, ge=0, le=100)
 
 
 class SimCreate(BaseModel):
