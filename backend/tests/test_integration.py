@@ -94,3 +94,14 @@ def test_sim_game_with_mixed_stock_and_crypto(client):
     s = client.post(f"/api/sim/{sid}/step", json={"bars": 50}).json()
     assert s["finished"] and s["period"] is not None and s["kronos"] is not None
     assert set(s["result"]) == {"you", "buy_hold", "sma_cross", "kronos"}
+
+
+def test_backtest_calibration_applies_only_to_matching_forecast_settings(client):
+    base = {"symbol": "SPY", "interval": "1d", "model": "mini", "lookback": 128, "horizon": 5, "samples": 4}
+    bt = client.post("/api/backtest", json={**base, "windows": 12}).json()
+    assert bt["calibration"]["oos_windows"] == 12 - 5
+    f = client.post("/api/forecast", json=base).json()
+    assert f["calibration"] is not None and "cal_p10" in f["forecast"][0]
+    assert f["forecast"][-1]["cal_p10"] <= f["forecast"][-1]["cal_p90"]
+    other = client.post("/api/forecast", json={**base, "samples": 8}).json()
+    assert other["calibration"] is None and other["calibration_mismatch"] is True

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import {
   api,
   type BacktestResponse,
+  type Calibration,
   type Candle,
   type ForecastResponse,
   type Health,
@@ -53,6 +54,7 @@ export default function App() {
   const [samples, setSamples] = useState(10)
   const [temperature, setTemperature] = useState(1.0)
   const [topP, setTopP] = useState(0.9)
+  const [btWindows, setBtWindows] = useState(30)
   const [tab, setTab] = useState<'forecast' | 'backtest' | 'tokens' | 'journal' | 'sim'>('forecast')
   const [journal, setJournal] = useState<JournalReport | null>(null)
   const [journalScope, setJournalScope] = useState<'symbol' | 'all'>('all')
@@ -152,8 +154,9 @@ export default function App() {
       const r = await api.backtest({
         ...params,
         horizon,
-        windows: 20,
-        samples: Math.min(samples, 5),
+        windows: btWindows,
+        // Same sampling as forecasts, so the band calibration it produces applies to them
+        samples,
         strategy: strategyParams,
       })
       setStrategy(r.strategy)
@@ -283,6 +286,7 @@ export default function App() {
           <Slider label="paths" value={samples} min={1} max={50} onChange={setSamples} />
           <Slider label="temp" value={temperature} min={0.1} max={2} step={0.1} onChange={setTemperature} />
           <Slider label="top_p" value={topP} min={0.1} max={1} step={0.05} onChange={setTopP} />
+          <Slider label="backtest windows" value={btWindows} min={10} max={40} onChange={setBtWindows} />
         </details>
 
         <div className="actions">
@@ -351,7 +355,21 @@ export default function App() {
                 value={forecast ? pct(forecast.stats.expected_return, 2) : '—'}
                 tone={forecast ? (forecast.stats.expected_return >= 0 ? 'up' : 'down') : undefined}
               />
-              <Stat label="band p10–p90" value={forecast ? pct(forecast.stats.band_width_pct).slice(1) : '—'} />
+              <Stat
+                label="band p10–p90"
+                value={
+                  forecast
+                    ? pct(forecast.stats.band_width_cal_pct ?? forecast.stats.band_width_pct).slice(1)
+                    : '—'
+                }
+                hint={
+                  !forecast
+                    ? ''
+                    : forecast.stats.band_width_cal_pct != null
+                      ? `calibrated · raw ${pct(forecast.stats.band_width_pct).slice(1)}`
+                      : 'raw · backtest to calibrate'
+                }
+              />
               <Stat label="latency" value={forecast ? `${(forecast.latency_ms / 1000).toFixed(1)}s` : '—'} />
             </div>
             {forecast && (
@@ -366,8 +384,21 @@ export default function App() {
               <span className="sw candle-hist" /> history
               <span className="sw candle-proj" /> projected (hollow up / solid down)
               <span className="sw median" /> median
-              <span className="sw band" /> p10–p90
+              <span className="sw band" /> raw p10–p90
+              {forecast?.calibration && (
+                <>
+                  <span className="sw cal" /> calibrated p10–p90 (backtest coverage {rate(forecast.calibration.raw_coverage)} →{' '}
+                  {rate(forecast.calibration.calibrated_coverage)} out-of-sample, {forecast.calibration.windows} windows)
+                </>
+              )}
             </p>
+            {forecast && !forecast.calibration && (
+              <p className="muted small">
+                {forecast.calibration_mismatch
+                  ? `the saved calibration for ${symbol} ${interval} was made with different lookback / sampling settings, so it doesn't apply. re-run the backtest with these settings.`
+                  : `kronos's raw bands are usually too narrow. run a backtest at this horizon to calibrate them; later forecasts for ${symbol} ${interval} will show the corrected band.`}
+              </p>
+            )}
           </>
         ) : backtest ? (
           <>
@@ -399,6 +430,7 @@ export default function App() {
               <Stat label="windows" value={String(backtest.metrics.windows)} />
               <Stat label="latency" value={`${(backtest.latency_ms / 1000).toFixed(1)}s`} />
             </div>
+            {backtest.calibration && <CalibrationNote c={backtest.calibration} />}
             <BacktestChart result={backtest} interval={interval} />
             <p className="legend">
               <span className="sw actual" /> actual <span className="sw median" /> forecast @ horizon
@@ -616,7 +648,15 @@ function ScorecardStats({ s }: { s: Scorecard }) {
         tone={s.hit_rate > s.baseline_hit_rate ? 'up' : 'down'}
       />
       <Stat label="r² oos" value={pct(s.r2_oos, 1)} hint="vs zero forecast" tone={s.r2_oos > 0 ? 'up' : 'down'} />
-      <Stat label="coverage" value={rate(s.coverage_p10_p90)} hint="ideal ≈ 80%" />
+      <Stat
+        label="coverage"
+        value={rate(s.coverage_calibrated?.calibrated ?? s.coverage_p10_p90)}
+        hint={
+          s.coverage_calibrated
+            ? `calibrated, n=${s.coverage_calibrated.n} · raw ${rate(s.coverage_calibrated.raw)}`
+            : `raw · ideal ≈ 80%`
+        }
+      />
       <Stat
         label="brier skill"
         value={pct(s.brier_skill, 1)}
@@ -661,6 +701,22 @@ function CalibrationChart({ bins }: { bins: Scorecard['calibration'] }) {
         </circle>
       ))}
     </svg>
+  )
+}
+
+function CalibrationNote({ c }: { c: Calibration }) {
+  return (
+    <div className="cal-note">
+      <span>
+        band calibration · raw coverage <b className={Math.abs(c.raw_coverage - c.target) > 0.1 ? 'down' : ''}>{rate(c.raw_coverage)}</b>{' '}
+        → calibrated <b className={Math.abs(c.calibrated_coverage - c.target) <= 0.1 ? 'up' : 'down'}>{rate(c.calibrated_coverage)}</b>{' '}
+        (target {rate(c.target)})
+      </span>
+      <span className="muted">
+        out-of-sample over {c.oos_windows} windows, each calibrated only on earlier ones · band {c.widening >= 0 ? 'widened' : 'narrowed'} by{' '}
+        {pct(Math.abs(c.widening))?.slice(1)} of price at the horizon · saved for live forecasts at this horizon
+      </span>
+    </div>
   )
 }
 

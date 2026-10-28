@@ -9,6 +9,7 @@ Return prediction R^2 is tiny even for good models; negative means worse than pr
 import numpy as np
 import pandas as pd
 
+from app.services import calibration
 from app.services.forecaster import Forecaster, summarize
 
 
@@ -103,6 +104,10 @@ def run_backtest(
                 "mae_pct": float(np.mean(np.abs(s["median"] - actual_close)) / last),
                 "naive_mae_pct": float(np.mean(np.abs(last - actual_close)) / last),
                 "ridge_return": ridge_forecast(df, e - 1, horizon, features),
+                # Per-step band and outcome as returns from the last close, for conformal calibration
+                "lo_path": (s["p10"] / last - 1).tolist(),
+                "hi_path": (s["p90"] / last - 1).tolist(),
+                "actual_path": (actual_close / last - 1).tolist(),
             }
         )
 
@@ -131,4 +136,4 @@ def run_backtest(
     first = ends[0] - lookback
     span = df.iloc[max(first, ends[0] - 50) : ends[-1] + horizon]
     actual_series = [{"time": int(t.timestamp()), "value": float(v)} for t, v in span["close"].items()]
-    return {"metrics": metrics, "windows": rows, "actual": actual_series}
+    return {"metrics": metrics, "windows": rows, "actual": actual_series, "calibration": calibration.calibrate(rows)}

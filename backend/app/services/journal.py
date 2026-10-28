@@ -64,7 +64,19 @@ CREATE TABLE IF NOT EXISTS backtests (
     r2_oos REAL NOT NULL,
     coverage REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS calibrations (
+    symbol TEXT NOT NULL,
+    interval TEXT NOT NULL,
+    model TEXT NOT NULL,
+    horizon INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    payload TEXT NOT NULL,
+    PRIMARY KEY (symbol, interval, model, horizon)
+);
 """
+
+# Columns added after the first release; created on older journals at startup
+MIGRATIONS = {"forecasts": {"cal_p10_final": "REAL", "cal_p90_final": "REAL"}}
 
 
 class Journal:
@@ -76,6 +88,11 @@ class Journal:
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            for table, cols in MIGRATIONS.items():
+                have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+                for col, kind in cols.items():
+                    if col not in have:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
@@ -89,6 +106,8 @@ class Journal:
             "origin_time", "last_close", "p_up", "expected_return", "pred_final", "p10_final", "p90_final",
         ]
         row = {k: entry[k] for k in cols}
+        row["cal_p10_final"] = entry.get("cal_p10_final")
+        row["cal_p90_final"] = entry.get("cal_p90_final")
         row["symbol"] = row["symbol"].upper()
         row["path"] = json.dumps(entry["path"])
         row["created_at"] = self.now()
@@ -116,6 +135,22 @@ class Journal:
                     metrics["baseline_hit_rate"], metrics["r2_oos"], metrics["coverage_p10_p90"],
                 ),
             )
+
+    def record_calibration(self, symbol: str, interval: str, model: str, horizon: int, cal: dict) -> None:
+        """Keep the latest band calibration per series; live forecasts with the same horizon use it."""
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO calibrations VALUES (?, ?, ?, ?, ?, ?)",
+                (symbol.upper(), interval, model, horizon, self.now(), json.dumps(cal)),
+            )
+
+    def get_calibration(self, symbol: str, interval: str, model: str, horizon: int) -> dict | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT created_at, payload FROM calibrations WHERE symbol=? AND interval=? AND model=? AND horizon=?",
+                (symbol.upper(), interval, model, horizon),
+            ).fetchone()
+        return row and {**json.loads(row["payload"]), "created_at": row["created_at"]}
 
     def score_pending(self) -> int:
         """Score every pending entry whose horizon has fully closed. Returns how many were scored."""
@@ -218,6 +253,16 @@ def scorecard(rows: list[dict], seed: int = 0) -> dict:
         perm_hits = (shuffled == np.sign(actual)).mean(axis=1)
         p_value = float((np.sum(perm_hits >= hits.mean()) + 1) / (PERMUTATIONS + 1))
 
+    # Conformally calibrated bands, for forecasts made when a calibration existed
+    with_cal = [i for i, r in enumerate(rows) if r.get("cal_p10_final") is not None]
+    cal_coverage = None
+    if with_cal:
+        c_lo = np.array([rows[i]["cal_p10_final"] for i in with_cal]) / last[with_cal] - 1
+        c_hi = np.array([rows[i]["cal_p90_final"] for i in with_cal]) / last[with_cal] - 1
+        a = actual[with_cal]
+        cal_coverage = {"n": len(with_cal), "raw": float(np.mean((a >= lo[with_cal]) & (a <= hi[with_cal]))),
+                        "calibrated": float(np.mean((a >= c_lo) & (a <= c_hi)))}
+
     calibration = []
     for a, b in zip(CALIBRATION_EDGES[:-1], CALIBRATION_EDGES[1:]):
         m = (p_up >= a) & ((p_up < b) if b < 1 else (p_up <= b))
@@ -230,6 +275,7 @@ def scorecard(rows: list[dict], seed: int = 0) -> dict:
         "baseline_hit_rate": float(max(up_rate, 1 - up_rate)),
         "r2_oos": r2_oos(actual, pred),
         "coverage_p10_p90": float(np.mean((actual >= lo) & (actual <= hi))),
+        "coverage_calibrated": cal_coverage,
         "mae_pct": float(np.mean(np.abs(actual - pred))),
         "brier": brier,
         # Against always saying 50%, which needs no hindsight; positive = better than a coin
@@ -247,6 +293,7 @@ def forecast_entry(req, last_close: float, origin_time: int, stats: dict, foreca
         "origin_time": origin_time, "last_close": last_close, "p_up": stats["p_up"],
         "expected_return": stats["expected_return"], "pred_final": forecast[-1]["median"],
         "p10_final": forecast[-1]["p10"], "p90_final": forecast[-1]["p90"],
+        "cal_p10_final": forecast[-1].get("cal_p10"), "cal_p90_final": forecast[-1].get("cal_p90"),
         "path": [{k: p[k] for k in ("time", "median", "p10", "p90")} for p in forecast],
     }
 

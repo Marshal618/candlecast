@@ -11,6 +11,7 @@ export const COLORS = {
   projected: '#d8b45c',
   forecast: '#d8b45c',
   band: 'rgba(216, 180, 92, 0.45)',
+  calBand: '#d8b45c',
   actual: '#5fb3a1',
   benchmark: '#7a858c',
 }

@@ -402,6 +402,33 @@ button.link {
   background: var(--muted);
 }
 
+.sw.cal {
+  background: var(--projected);
+  height: 1px;
+  border-top: 1px solid var(--projected);
+}
+
+.cal-note {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-left: 2px solid var(--projected);
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.cal-note .muted {
+  font-size: 11px;
+}
+
+.cal-note .up {
+  color: var(--up);
+}
+
+.cal-note .down {
+  color: var(--down);
+}
+
 .sw.actual {
   background: var(--accent);
 }

@@ -139,6 +139,20 @@ export function PriceChart({
       p10.setData(line('p10'))
       added.push(projected, median, p90, p10)
 
+      // Calibrated band: Kronos's raw band widened (or narrowed) to hit its stated 80% coverage
+      if (forecast.forecast[0].cal_p10 != null) {
+        for (const key of ['cal_p10', 'cal_p90'] as const) {
+          const band = chart.addLineSeries({
+            color: COLORS.calBand,
+            lineWidth: 1,
+            lastValueVisible: true,
+            priceLineVisible: false,
+          })
+          band.setData([anchor, ...forecast.forecast.map((p) => ({ time: ts(p.time), value: p[key] as number }))])
+          added.push(band)
+        }
+      }
+
       candleSeries.setMarkers([
         { time: ts(forecast.last_time), position: 'aboveBar', color: COLORS.actual, shape: 'arrowDown', text: 'NOW' },
       ])

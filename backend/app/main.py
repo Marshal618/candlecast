@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.schemas import BacktestRequest, ForecastRequest, Interval, ModelName, SimCreate, SimHint, SimOrder, SimStep, StrategyRequest, TokensRequest
+from app.services import calibration
 from app.services.backtest import run_backtest
 from app.services.journal import Journal, forecast_entry
 from app.services.sim_session import SimError, SimStore
@@ -64,6 +65,11 @@ def _check_lookback(model: str, lookback: int, available: int) -> int:
     return min(lookback, available)
 
 
+def _band_settings(req) -> dict:
+    """Settings that change how wide Kronos's sampled bands come out."""
+    return {"lookback": req.lookback, "samples": req.samples, "temperature": req.temperature, "top_p": req.top_p}
+
+
 @app.get("/api/health")
 def health():
     return {
@@ -112,6 +118,18 @@ async def forecast(req: ForecastRequest):
         for i, tm in enumerate(times)
     ]
     stats = {"p_up": s["p_up"], "expected_return": s["expected_return"], "band_width_pct": s["band_width_pct"]}
+    # Conformally widen the band if a backtest has calibrated this series at this horizon
+    cal = await run_in_threadpool(journal.get_calibration, req.symbol, req.interval, req.model, len(times))
+    # Band width depends on the sampling settings, so a calibration only transfers to identical ones
+    settings_now = _band_settings(req)
+    cal_mismatch = cal is not None and cal.get("settings") != settings_now
+    if cal_mismatch:
+        cal = None
+    if cal:
+        lo, hi = calibration.apply(last_close, s["p10"], s["p90"], cal["q"])
+        for p, a, b in zip(forecast_points, lo, hi):
+            p["cal_p10"], p["cal_p90"] = float(a), float(b)
+        stats["band_width_cal_pct"] = float((hi[-1] - lo[-1]) / last_close)
     origin_time = int(ctx.index[-1].timestamp())
     journal_id, created = await run_in_threadpool(
         journal.record_forecast, forecast_entry(req, last_close, origin_time, stats, forecast_points)
@@ -122,6 +140,8 @@ async def forecast(req: ForecastRequest):
         "interval": req.interval,
         "model": req.model,
         "journal": {"id": journal_id, "new": created},
+        "calibration": cal and {k: cal[k] for k in ("target", "windows", "oos_windows", "raw_coverage", "calibrated_coverage", "created_at")},
+        "calibration_mismatch": cal_mismatch,
         "lookback_used": lookback,
         "last_close": last_close,
         "last_time": origin_time,
@@ -156,6 +176,11 @@ async def backtest(req: BacktestRequest):
             raise HTTPException(422, str(e)) from e
     strategy = run_strategy(df, result["windows"], req.horizon, **req.strategy.model_dump())
     await run_in_threadpool(journal.record_backtest, req.symbol, req.interval, req.model, req.horizon, result["metrics"])
+    if result["calibration"]:
+        result["calibration"]["settings"] = _band_settings(req)
+        await run_in_threadpool(
+            journal.record_calibration, req.symbol, req.interval, req.model, req.horizon, result["calibration"]
+        )
     return {
         "symbol": req.symbol.upper(),
         "interval": req.interval,

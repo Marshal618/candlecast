@@ -17,6 +17,9 @@ the same way a language model predicts the next word.
 - **Backtest:** walk-forward forecasts from past windows scored against what actually happened,
   next to naive baselines (no-change price, majority direction), out-of-sample R², and a
   walk-forward ridge regression baseline.
+- **Calibrated bands:** Kronos's raw p10–p90 bands are far too narrow (20–55% real coverage in
+  our tests). Backtests conformally calibrate them, and live forecasts show the corrected band.
+  See [Band calibration](#band-calibration).
 - **Forecast journal:** every forecast you run is logged and scored automatically once its bars
   close, giving a live track record the model cannot have seen in pre-training. See
   [Forecast journal](#forecast-journal).
@@ -93,6 +96,7 @@ backend/
   app/main.py                 FastAPI routes: /api/health, /api/candles, /api/forecast, /api/backtest, /api/strategy, /api/tokens, /api/journal, /api/sim/*
   app/services/market_data.py yfinance provider, SQLite cache, future-timestamp projection
   app/services/forecaster.py  Kronos loading + independent sampled paths + quantile stats
+  app/services/calibration.py conformal (CQR) calibration of forecast bands
   app/services/backtest.py    walk-forward evaluation with baselines
   app/services/sim.py         market replay engine: order fills, accounts, bots, performance
   app/services/sim_session.py game sessions, Kronos bot + hints, leaderboard
@@ -121,6 +125,32 @@ The Backtest tab's strategy panel answers "would trading on these forecasts have
   which re-simulates the stored P(up) values in milliseconds without touching the model.
 
 Simulation code: `backend/app/services/strategy.py`.
+
+## Band calibration
+
+A p10–p90 band should contain the outcome 80% of the time. Kronos's sampled bands don't: across
+SPY, NVDA, BTC-USD (daily) and AAPL (hourly), 40-window backtests found raw coverage of only
+**20–54%**. The model is overconfident.
+
+Candlecast fixes this with conformalized quantile regression (CQR; Romano, Patterson & Candès 2019):
+
+1. Each backtest window's band and outcome are expressed as returns from the last close.
+2. The nonconformity score is how far the outcome landed outside the band (negative = inside).
+3. The band is widened, per forecast step, by the ⌈(n+1)·0.8⌉-th smallest score.
+
+**Honest check.** Markets aren't exchangeable, so the guarantee isn't automatic. The Backtest tab
+reports a *sequential* out-of-sample test: each window is calibrated only on earlier windows. In
+the runs above, coverage moved from 31–54% raw to **77–96%** calibrated, against the 80% target.
+It errs on the wide side after volatile periods.
+
+**Where it's used.** A backtest saves its calibration per symbol, interval, model and horizon, along
+with the lookback and sampling settings (band width depends on them). Forecasts with exactly
+those settings draw the calibrated band and log it to the journal, whose scorecard then tracks
+live calibrated coverage. If the settings differ, the forecast says so and shows the raw band.
+
+More windows give a better calibration (the "backtest windows" control, 10–40). Next step:
+adaptive conformal inference (Gibbs & Candès 2021) to update the width online as live forecasts
+are scored, which should cut the over-coverage after volatility drops.
 
 ## Forecast journal
 

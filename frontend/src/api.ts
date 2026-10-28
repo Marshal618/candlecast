@@ -15,6 +15,9 @@ export interface ForecastPoint {
   median: number
   p10: number
   p90: number
+  // Conformally calibrated band, when a backtest has calibrated this series and horizon
+  cal_p10?: number
+  cal_p90?: number
   open: number
   high: number
   low: number
@@ -30,8 +33,20 @@ export interface ForecastResponse {
   last_close: number
   last_time: number
   latency_ms: number
-  stats: { p_up: number; expected_return: number; band_width_pct: number }
+  stats: { p_up: number; expected_return: number; band_width_pct: number; band_width_cal_pct?: number }
   forecast: ForecastPoint[]
+  calibration?: (Omit<Calibration, 'q' | 'widening'> & { created_at: number }) | null
+  calibration_mismatch?: boolean
+}
+
+export interface Calibration {
+  target: number
+  windows: number
+  q: number[]
+  oos_windows: number
+  raw_coverage: number
+  calibrated_coverage: number
+  widening: number
 }
 
 export interface BacktestWindow {
@@ -96,6 +111,7 @@ export interface BacktestResponse {
   windows: BacktestWindow[]
   actual: { time: number; value: number }[]
   strategy: StrategyResult
+  calibration: Calibration | null
 }
 
 export interface TokenPrototype {
@@ -153,6 +169,7 @@ export interface Scorecard {
   baseline_hit_rate: number
   r2_oos: number
   coverage_p10_p90: number
+  coverage_calibrated: { n: number; raw: number; calibrated: number } | null
   mae_pct: number
   brier: number
   brier_skill: number
