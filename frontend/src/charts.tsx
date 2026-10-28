@@ -8,8 +8,8 @@ import {
   type SeriesType,
   type UTCTimestamp,
 } from 'lightweight-charts'
-import type { BacktestResponse, Candle, ForecastResponse, Interval, SimBot, SimPlayer, SimState, StrategyResult, TokensResponse } from './api'
-import { COLORS, PLAYER_COLORS } from './theme'
+import type { BacktestResponse, Candle, CrossSectionResponse, ForecastResponse, Interval, SimBot, SimPlayer, SimState, StrategyResult, TokensResponse } from './api'
+import { COLORS, FACTOR_COLORS, MODEL_COLORS, PLAYER_COLORS } from './theme'
 
 
 const ts = (t: number) => t as UTCTimestamp
@@ -375,6 +375,34 @@ export function RaceChart({ sim, timeLabel }: { sim: SimState; timeLabel?: TimeL
       removeAll(chart, series)
     }
   }, [sim, chart])
+
+  return <div ref={ref} className="chart chart-short" />
+}
+
+// Cumulative net long-short return of every signal, plus the equal-weight universe for scale
+export function LongShortChart({ result, selected }: { result: CrossSectionResponse; selected: string | null }) {
+  const { ref, chart } = useChart(result.interval)
+
+  useEffect(() => {
+    if (!chart) return
+    const fmt = { type: 'custom' as const, formatter: (v: number) => `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%` }
+    // Each period's return is realized at the next rebalance, so plot it there (first point = start, 0%)
+    const times = [...result.origin_times, result.origin_times.at(-1)! + (result.origin_times.at(-1)! - result.origin_times.at(-2)!)]
+    const line = (values: number[], color: string, width: 1 | 2, style: LineStyle) => {
+      const s = chart.addLineSeries({ color, lineWidth: width, lineStyle: style, priceFormat: fmt, priceLineVisible: false, lastValueVisible: false })
+      s.setData([0, ...values.map((v) => v - 1)].map((value, i) => ({ time: ts(times[i]), value })))
+      return s
+    }
+    const series = [line(result.universe.equity, COLORS.benchmark, 1, LineStyle.Dotted)]
+    for (const sig of result.signals) {
+      const color = sig.kind === 'factor' ? FACTOR_COLORS[sig.name as keyof typeof FACTOR_COLORS] : MODEL_COLORS[sig.name as keyof typeof MODEL_COLORS]
+      series.push(line(sig.equity, color, sig.name === selected ? 2 : 1, sig.kind === 'factor' ? LineStyle.Dashed : LineStyle.Solid))
+    }
+    chart.timeScale().fitContent()
+    return () => {
+      removeAll(chart, series)
+    }
+  }, [result, selected, chart])
 
   return <div ref={ref} className="chart chart-short" />
 }

@@ -890,3 +890,67 @@ button.link {
     height: 360px;
   }
 }
+
+/* ── research ─────────────────────────────────────── */
+
+.setup-grid .quick {
+  grid-template-columns: repeat(4, 1fr);
+  margin-top: 6px;
+}
+
+.research tbody tr {
+  cursor: pointer;
+}
+
+.research tbody tr:hover td {
+  background: var(--panel);
+}
+
+.bars {
+  display: flex;
+  align-items: stretch;
+  gap: 3px;
+  height: 140px;
+  margin-top: 10px;
+  padding-bottom: 28px;
+}
+
+.bar-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  min-width: 0;
+}
+
+.bar-half {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.bar-half + .bar-half {
+  justify-content: flex-start;
+  border-top: 1px solid var(--border-strong);
+}
+
+.bar.up {
+  background: var(--up);
+}
+
+.bar.down {
+  background: var(--down);
+}
+
+.bar-label {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 4px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}

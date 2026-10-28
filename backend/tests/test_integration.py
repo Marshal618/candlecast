@@ -122,3 +122,18 @@ def test_challenger_forecast_and_backtest(client, model):
 def test_tokens_rejects_challengers(client):
     r = client.post("/api/tokens", json={"symbol": "SPY", "interval": "1d", "model": "garch"})
     assert r.status_code == 422
+
+
+def test_crosssection_ranks_a_universe(client):
+    r = client.post(
+        "/api/crosssection",
+        json={"symbols": ["XLE", "XLF", "XLK", "XLU", "XLV", "BTC-USD"], "models": ["mini", "naive"], "periods": 6, "samples": 3},
+    )
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["periods"] == 6 and len(d["symbols"]) == 6
+    assert [s["name"] for s in d["signals"]] == ["mini", "naive", "momentum", "reversal"]
+    for s in d["signals"]:
+        assert -1 <= s["rank_ic"]["mean"] <= 1
+        assert len(s["equity"]) == 6 and len(s["bucket_returns"]) == 3
+    assert "rank_ic_residual" in d["signals"][0] and "rank_ic_residual" not in d["signals"][-1]

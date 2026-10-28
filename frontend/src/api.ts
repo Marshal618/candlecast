@@ -221,6 +221,63 @@ export interface JournalReport {
   entries: JournalEntry[]
 }
 
+export type Factor = 'momentum' | 'reversal'
+
+export interface CrossSectionRequest {
+  symbols: string[]
+  interval: '1d' | '1h'
+  models: ModelName[]
+  lookback: number
+  horizon: number
+  periods: number
+  buckets: number
+  samples: number
+  cost_bps: number
+}
+
+export interface IcStats {
+  mean: number
+  std: number
+  icir: number
+  t_stat: number
+  positive: number
+}
+
+export interface CrossSectionSignal {
+  name: ModelName | Factor
+  kind: 'model' | 'factor'
+  ic: IcStats
+  rank_ic: IcStats
+  rank_ic_residual?: IcStats
+  rank_ic_series: (number | null)[]
+  bucket_returns: number[]
+  long_short: {
+    gross_mean: number
+    net_mean: number
+    ann_return: number
+    sharpe: number
+    max_drawdown: number
+    hit_rate: number
+    turnover: number
+  }
+  equity: number[]
+  corr: Partial<Record<Factor, number>>
+}
+
+export interface CrossSectionResponse {
+  interval: '1d' | '1h'
+  horizon: number
+  buckets: number
+  latency_ms: number
+  symbols: string[]
+  periods: number
+  origin_times: number[]
+  periods_per_year: number
+  universe: { equity: number[]; mean: number }
+  dispersion: number
+  signals: CrossSectionSignal[]
+}
+
 export type SimBot = 'sma_cross' | 'kronos'
 export type SimPlayer = 'you' | 'buy_hold' | SimBot
 export type OrderSide = 'buy' | 'sell'
@@ -355,6 +412,8 @@ export const api = {
       request<SimHint>(`/api/sim/${id}/hint`, { method: 'POST', body: JSON.stringify({ symbol, horizon }) }),
     finish: (id: string) => request<SimState>(`/api/sim/${id}/finish`, { method: 'POST' }),
   },
+  crosssection: (body: CrossSectionRequest) =>
+    request<CrossSectionResponse>('/api/crosssection', { method: 'POST', body: JSON.stringify(body) }),
   tokens: (body: Record<string, unknown>) =>
     request<TokensResponse>('/api/tokens', { method: 'POST', body: JSON.stringify(body) }),
   strategy: (body: Record<string, unknown>, signal?: AbortSignal) =>

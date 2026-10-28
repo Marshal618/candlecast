@@ -1,3 +1,4 @@
+import asyncio
 import time
 from contextlib import asynccontextmanager
 
@@ -7,9 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.schemas import BacktestRequest, ForecastRequest, Interval, ModelName, SimCreate, SimHint, SimOrder, SimStep, StrategyRequest, TokensRequest
+from app.schemas import BacktestRequest, CrossSectionRequest, ForecastRequest, Interval, ModelName, SimCreate, SimHint, SimOrder, SimStep, StrategyRequest, TokensRequest
 from app.services import calibration
 from app.services.backtest import run_backtest
+from app.services.crosssection import run_crosssection
 from app.services.journal import Journal, forecast_entry
 from app.services.sim_session import SimError, SimStore
 from app.services.forecaster import MAX_CONTEXT, Forecaster, Timer, summarize
@@ -210,6 +212,39 @@ async def tokens(req: TokensRequest):
     with Timer() as t:
         result = await run_in_threadpool(forecaster.inspect, df.tail(lookback), df, req.model, req.segments)
     return {"symbol": req.symbol.upper(), "interval": req.interval, "model": req.model, "latency_ms": round(t.ms), **result}
+
+
+@app.post("/api/crosssection")
+async def crosssection(req: CrossSectionRequest):
+    symbols = list(dict.fromkeys(s.strip().upper() for s in req.symbols if s.strip()))
+    if len(symbols) < 4:
+        raise HTTPException(422, "Need at least 4 distinct symbols to rank.")
+    for m in req.models:
+        _check_lookback(m, req.lookback, req.lookback)
+    now = time.time()
+    loaded = await asyncio.gather(*(_load(s, req.interval) for s in symbols))
+    frames = {s: closed_bars(df, req.interval, now) for s, df in zip(symbols, loaded)}
+    with Timer() as t:
+        try:
+            result = await run_in_threadpool(
+                lambda: run_crosssection(
+                    forecaster,
+                    frames,
+                    interval=req.interval,
+                    models=list(dict.fromkeys(req.models)),
+                    lookback=req.lookback,
+                    horizon=req.horizon,
+                    periods=req.periods,
+                    buckets=req.buckets,
+                    samples=req.samples,
+                    temperature=req.temperature,
+                    top_p=req.top_p,
+                    cost_bps=req.cost_bps,
+                )
+            )
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+    return {"interval": req.interval, "horizon": req.horizon, "buckets": req.buckets, "latency_ms": round(t.ms), **result}
 
 
 @app.get("/api/journal")

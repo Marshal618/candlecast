@@ -21,6 +21,7 @@ import { pct, rate } from './format'
 import { MODEL_COLORS, MODEL_LABELS } from './theme'
 import { Slider, Stat } from './ui'
 import { SimView } from './Sim'
+import { ResearchView } from './Research'
 import './App.css'
 
 const INTERVALS: Interval[] = ['5m', '15m', '1h', '1d']
@@ -57,12 +58,12 @@ export default function App() {
   const [cmpForecasts, setCmpForecasts] = useState<Partial<Record<ModelName, ForecastResponse>> | null>(null)
   const [cmpBacktests, setCmpBacktests] = useState<Partial<Record<ModelName, BacktestResponse>> | null>(null)
   const [horizon, setHorizon] = useState(20)
-  const [lookback, setLookback] = useState(400)
+  const [lookback, setLookback] = useState(64)
   const [samples, setSamples] = useState(10)
   const [temperature, setTemperature] = useState(1.0)
   const [topP, setTopP] = useState(0.9)
   const [btWindows, setBtWindows] = useState(30)
-  const [tab, setTab] = useState<'forecast' | 'backtest' | 'tokens' | 'journal' | 'sim'>('forecast')
+  const [tab, setTab] = useState<'forecast' | 'backtest' | 'tokens' | 'journal' | 'research' | 'sim'>('forecast')
   const [journal, setJournal] = useState<JournalReport | null>(null)
   const [journalScope, setJournalScope] = useState<'symbol' | 'all'>('all')
   const [tokens, setTokens] = useState<TokensResponse | null>(null)
@@ -391,6 +392,9 @@ export default function App() {
           <button className={tab === 'journal' ? 'active' : ''} onClick={() => setTab('journal')}>
             Journal
           </button>
+          <button className={tab === 'research' ? 'active' : ''} onClick={() => setTab('research')}>
+            Research
+          </button>
           <button className={tab === 'sim' ? 'active' : ''} onClick={() => setTab('sim')}>
             Sim
           </button>
@@ -401,6 +405,8 @@ export default function App() {
 
         {tab === 'sim' ? (
           <SimView watchlist={watchlist} onError={setError} />
+        ) : tab === 'research' ? (
+          <ResearchView onError={setError} />
         ) : tab === 'journal' ? (
           <JournalView
             report={journal}

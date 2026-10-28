@@ -61,11 +61,15 @@ def _align(f: pd.DataFrame, interval: str) -> pd.DataFrame:
     Intraday bars key on the UTC hour (a stock's 9:30 bar lines up with crypto's 9:00 one).
     """
     f = f.copy()
-    if interval == "1d":
-        f.index = pd.DatetimeIndex(f.index.date).tz_localize("UTC")
-    else:
-        f.index = f.index.tz_convert("UTC").floor("h")
+    f.index = align_keys(f.index, interval)
     return f[~f.index.duplicated(keep="last")]
+
+
+def align_keys(index: pd.DatetimeIndex, interval: str) -> pd.DatetimeIndex:
+    """The shared-clock timestamp of each bar (see _align)."""
+    if interval == "1d":
+        return pd.DatetimeIndex(index.date).tz_localize("UTC")
+    return index.tz_convert("UTC").floor("h")
 
 
 def build_market(frames: dict[str, pd.DataFrame], interval: str = "1d") -> Market:

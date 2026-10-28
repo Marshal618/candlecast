@@ -96,12 +96,13 @@ docker compose up --build     # single container on :8000 serving API and built 
 
 ```
 backend/
-  app/main.py                 FastAPI routes: /api/health, /api/candles, /api/forecast, /api/backtest, /api/strategy, /api/tokens, /api/journal, /api/sim/*
+  app/main.py                 FastAPI routes: /api/health, /api/candles, /api/forecast, /api/backtest, /api/strategy, /api/tokens, /api/journal, /api/crosssection, /api/sim/*
   app/services/market_data.py yfinance provider, SQLite cache, future-timestamp projection
   app/services/forecaster.py  Kronos loading + independent sampled paths + quantile stats
   app/services/challengers.py naive / GARCH / Chronos-Bolt forecasters for comparison
   app/services/calibration.py conformal (CQR) calibration of forecast bands
   app/services/backtest.py    walk-forward evaluation with baselines
+  app/services/crosssection.py universe ranking research: RankIC, bucket and long-short portfolios, factors
   app/services/sim.py         market replay engine: order fills, accounts, bots, performance
   app/services/sim_session.py game sessions, Kronos bot + hints, leaderboard
   app/services/journal.py     live forecast log, scoring of closed horizons, scorecard + calibration
@@ -111,6 +112,7 @@ backend/
 frontend/
   src/App.tsx                 dashboard UI
   src/Sim.tsx                 market replay game UI
+  src/Research.tsx            cross-sectional research UI
   src/charts.tsx              lightweight-charts candle/forecast/backtest charts
 ```
 
@@ -151,6 +153,43 @@ only, so they draw lines and bands rather than candles. Chronos-Bolt outputs qua
 not samples; its paths are drawn at fixed quantile levels, so tails beyond p10/p90 are clamped.
 
 The token inspector and the Sim's Kronos bot remain Kronos-only.
+
+## Cross-sectional research
+
+The **Research** tab asks the question quant funds actually trade on: not "will this asset go up?"
+but "which of these assets will do better than the others?" A model can be useless for timing
+and still rank well, and a ranking can be traded market-neutral.
+
+Every `horizon` bars (non-overlapping), each selected model forecasts every symbol in the universe
+from data up to that close, and the universe is ranked by the median sampled return. Two classic
+price factors are ranked alongside with no model calls: **momentum** (60-bar return skipping the
+last 5, Jegadeesh & Titman 1993) and **short-term reversal** (minus the last `horizon`-bar return,
+Lehmann 1990). Each ranking is scored against realized forward returns:
+
+- **RankIC**: Spearman correlation between ranking and returns, per rebalance (the Kronos paper's
+  headline metric), with ICIR and a t-stat. |t| > 2 is the usual "probably not luck" bar.
+- **Buckets**: equal-weight returns from lowest-ranked to highest. A real signal climbs.
+- **Long-short**: long the top bucket, short the bottom, net of costs per unit of turnover, with
+  Sharpe, drawdown and the share of the book traded each rebalance.
+- **ρ reversal / ρ momentum**: how much a model's ranking is just a known factor.
+- **Beyond factors**: RankIC of what's left after regressing the factors' ranks out each period.
+
+Presets cover sector ETFs, mega caps, country ETFs and crypto. Symbols are aligned by calendar
+date, and rebalances use days every symbol traded.
+
+First results (Kronos-mini, lookback 64, 8 paths, 5 bps):
+
+| Universe, rebalance | kronos-mini RankIC (t) | beyond factors (t) | ρ reversal | reversal RankIC (t) | best challenger |
+|---|---|---|---|---|---|
+| 11 sector ETFs, 5d × 24 | +0.09 (1.3) | −0.01 (−0.2) | 0.34 | +0.16 (2.1) | chronos +0.03 |
+| 20 mega caps, 5d × 40 | +0.10 (2.8) | +0.07 (2.1) | 0.25 | +0.09 (2.2) | naive +0.04 |
+| 20 mega caps, 20d × 30 | +0.08 (1.4) | +0.04 (0.9) | 0.34 | +0.08 (1.5) | chronos −0.01 |
+
+Kronos-mini ranks better than every challenger in all three (RankIC +0.08 to +0.10), but much of
+that is short-term reversal, which its per-window normalization builds in. Only on mega caps at
+5-day rebalances does anything survive once the factors are removed (residual t = 2.1), and the
+plain reversal factor does about as well for free. These are small samples (24–40 rebalances), so
+treat them as a starting point, not a verdict.
 
 ## Band calibration
 
@@ -308,5 +347,10 @@ it's trusted.
 ## Known behaviour
 
 Kronos normalizes each input window by that window's mean and std, so after a strong trend it tends
-to forecast reversion toward the window's average price. Longer lookbacks pull harder. Use the
-Backtest tab to check whether that has paid off for a given ticker and interval before trusting it.
+to forecast reversion toward the window's average price. Longer lookbacks pull harder: in a
+40-window comparison on SPY, NVDA and BTC-USD, Kronos-mini's R²_OOS was −23% at 64 bars, −41% at 128
+and −190% at 400, which is why the default lookback is 64. Use the Backtest tab to check whether
+that has paid off for a given ticker and interval before trusting it.
+
+Kronos sampling is seeded (`SEED` in `forecaster.py`), so the same inputs give the same paths and
+backtests reproduce. Before seeding, two identical 8-path research runs gave RankIC 0.036 and 0.081.

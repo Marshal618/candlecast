@@ -1,4 +1,4 @@
-import type { ModelName, SimPlayer } from './api'
+import type { Factor, ModelName, SimPlayer } from './api'
 
 export const COLORS = {
   bg: '#101418',
@@ -40,4 +40,15 @@ export const MODEL_LABELS: Record<ModelName, string> = {
   naive: 'naive (hist. avg + bootstrap)',
   garch: 'garch(1,1)-t',
   chronos: 'chronos-bolt',
+}
+
+// Price factors in the Research tab, drawn dashed so they read as yardsticks rather than models
+export const FACTOR_COLORS: Record<Factor, string> = {
+  momentum: '#b8b07a',
+  reversal: '#7ec4cf',
+}
+
+export const FACTOR_LABELS: Record<Factor, string> = {
+  momentum: 'momentum 60-5',
+  reversal: 'short-term reversal',
 }
