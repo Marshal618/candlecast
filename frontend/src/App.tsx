@@ -22,6 +22,7 @@ import { MODEL_COLORS, MODEL_LABELS } from './theme'
 import { Slider, Stat } from './ui'
 import { SimView } from './Sim'
 import { ResearchView } from './Research'
+import { PortfolioView } from './Portfolio'
 import './App.css'
 
 const INTERVALS: Interval[] = ['5m', '15m', '1h', '1d']
@@ -63,7 +64,7 @@ export default function App() {
   const [temperature, setTemperature] = useState(1.0)
   const [topP, setTopP] = useState(0.9)
   const [btWindows, setBtWindows] = useState(30)
-  const [tab, setTab] = useState<'forecast' | 'backtest' | 'tokens' | 'journal' | 'research' | 'sim'>('forecast')
+  const [tab, setTab] = useState<'forecast' | 'backtest' | 'tokens' | 'journal' | 'research' | 'portfolio' | 'sim'>('forecast')
   const [journal, setJournal] = useState<JournalReport | null>(null)
   const [journalScope, setJournalScope] = useState<'symbol' | 'all'>('all')
   const [tokens, setTokens] = useState<TokensResponse | null>(null)
@@ -395,6 +396,9 @@ export default function App() {
           <button className={tab === 'research' ? 'active' : ''} onClick={() => setTab('research')}>
             Research
           </button>
+          <button className={tab === 'portfolio' ? 'active' : ''} onClick={() => setTab('portfolio')}>
+            Portfolio
+          </button>
           <button className={tab === 'sim' ? 'active' : ''} onClick={() => setTab('sim')}>
             Sim
           </button>
@@ -407,6 +411,8 @@ export default function App() {
           <SimView watchlist={watchlist} onError={setError} />
         ) : tab === 'research' ? (
           <ResearchView onError={setError} />
+        ) : tab === 'portfolio' ? (
+          <PortfolioView onError={setError} />
         ) : tab === 'journal' ? (
           <JournalView
             report={journal}

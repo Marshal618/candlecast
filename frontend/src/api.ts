@@ -278,7 +278,79 @@ export interface CrossSectionResponse {
   signals: CrossSectionSignal[]
 }
 
-export type SimBot = 'sma_cross' | 'kronos'
+export type SignalName = ModelName | Factor
+
+export interface Construction {
+  method: 'equal' | 'inverse_vol' | 'mean_variance'
+  side: 'long_short' | 'long_only'
+  select: number
+  risk_window: number
+  vol_target: number | null
+  max_gross: number
+  trade_rate: number
+}
+
+export interface PortfolioRequest {
+  symbols: string[]
+  interval: '1d' | '1h'
+  signals: { name: SignalName; weight: number }[]
+  weighting: 'manual' | 'ic'
+  ic_window: number
+  construction: Construction
+  lookback: number
+  horizon: number
+  periods: number
+  samples: number
+  cost_bps: number
+}
+
+export interface PortfolioMetrics {
+  ann_return: number
+  ann_vol: number
+  sharpe: number
+  sharpe_period: number
+  max_drawdown: number
+  hit_rate: number
+  turnover: number
+  avg_gross: number
+  avg_net: number
+  ex_ante_vol: number
+  cost_drag: number
+  bench_ann_return: number
+  skew: number
+  kurtosis: number
+}
+
+export interface Trial {
+  id: number
+  name: string | null
+  created_at?: number
+  config: Omit<PortfolioRequest, 'symbols'>
+  metrics: PortfolioMetrics
+  final_blend?: Partial<Record<SignalName, number>>
+}
+
+export interface PortfolioResponse {
+  interval: '1d' | '1h'
+  horizon: number
+  latency_ms: number
+  trial_id: number
+  deflation: { trials: number; psr: number; dsr: number; luck_sharpe: number }
+  study: Trial[]
+  symbols: string[]
+  origin_times: number[]
+  periods: number
+  periods_per_year: number
+  signals: SignalName[]
+  equity: number[]
+  benchmark: number[]
+  weights: number[][]
+  blend: number[][]
+  final_blend: Partial<Record<SignalName, number>>
+  metrics: PortfolioMetrics
+}
+
+export type SimBot = 'sma_cross' | 'kronos' | 'portfolio'
 export type SimPlayer = 'you' | 'buy_hold' | SimBot
 export type OrderSide = 'buy' | 'sell'
 export type OrderType = 'market' | 'limit' | 'stop'
@@ -294,6 +366,7 @@ export interface SimConfig {
   slippage_bps: number
   bots: SimBot[]
   kronos_model: KronosName
+  recipe_id: number | null
 }
 
 export interface SimOrder {
@@ -344,6 +417,7 @@ export interface SimState {
   curve: ({ time: number } & Partial<Record<SimPlayer, number>>)[]
   players: Partial<Record<SimPlayer, PlayerStats>>
   kronos: { p_up: number[]; weights: number[] } | null
+  recipe: { id: number; name: string; blend: Partial<Record<SignalName, number>>; horizon: number } | null
   result: Partial<Record<SimPlayer, { return: number; sharpe: number; max_drawdown: number; trades: number }>> | null
 }
 
@@ -411,6 +485,13 @@ export const api = {
     hint: (id: string, symbol: string, horizon = 10) =>
       request<SimHint>(`/api/sim/${id}/hint`, { method: 'POST', body: JSON.stringify({ symbol, horizon }) }),
     finish: (id: string) => request<SimState>(`/api/sim/${id}/finish`, { method: 'POST' }),
+  },
+  portfolio: {
+    run: (body: PortfolioRequest) =>
+      request<PortfolioResponse>('/api/portfolio', { method: 'POST', body: JSON.stringify(body) }),
+    recipes: () => request<Trial[]>('/api/portfolio/recipes'),
+    save: (trial_id: number, name: string) =>
+      request<Trial>('/api/portfolio/recipes', { method: 'POST', body: JSON.stringify({ trial_id, name }) }),
   },
   crosssection: (body: CrossSectionRequest) =>
     request<CrossSectionResponse>('/api/crosssection', { method: 'POST', body: JSON.stringify(body) }),

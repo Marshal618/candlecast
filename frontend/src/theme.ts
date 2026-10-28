@@ -1,4 +1,4 @@
-import type { Factor, ModelName, SimPlayer } from './api'
+import type { Factor, ModelName, SignalName, SimPlayer } from './api'
 
 export const COLORS = {
   bg: '#101418',
@@ -21,6 +21,7 @@ export const PLAYER_COLORS: Record<SimPlayer, string> = {
   buy_hold: COLORS.benchmark,
   sma_cross: '#8fa8d8',
   kronos: COLORS.projected,
+  portfolio: '#c28fd6',
 }
 
 // Kronos sizes share the brass of the projected candles; each challenger gets its own hue
@@ -52,3 +53,6 @@ export const FACTOR_LABELS: Record<Factor, string> = {
   momentum: 'momentum 60-5',
   reversal: 'short-term reversal',
 }
+
+export const signalLabel = (s: SignalName) => (s in FACTOR_LABELS ? FACTOR_LABELS[s as Factor] : MODEL_LABELS[s as ModelName])
+export const signalColor = (s: SignalName) => (s in FACTOR_COLORS ? FACTOR_COLORS[s as Factor] : MODEL_COLORS[s as ModelName])

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-BOTS = ("buy_hold", "sma_cross", "kronos")
+BOTS = ("buy_hold", "sma_cross", "kronos", "portfolio")
 SMA_FAST, SMA_SLOW = 20, 50
 
 

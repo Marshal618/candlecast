@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   createChart,
   CrosshairMode,
@@ -9,7 +9,7 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts'
 import type { BacktestResponse, Candle, CrossSectionResponse, ForecastResponse, Interval, SimBot, SimPlayer, SimState, StrategyResult, TokensResponse } from './api'
-import { COLORS, FACTOR_COLORS, MODEL_COLORS, PLAYER_COLORS } from './theme'
+import { COLORS, PLAYER_COLORS, signalColor } from './theme'
 
 
 const ts = (t: number) => t as UTCTimestamp
@@ -379,30 +379,51 @@ export function RaceChart({ sim, timeLabel }: { sim: SimState; timeLabel?: TimeL
   return <div ref={ref} className="chart chart-short" />
 }
 
-// Cumulative net long-short return of every signal, plus the equal-weight universe for scale
-export function LongShortChart({ result, selected }: { result: CrossSectionResponse; selected: string | null }) {
-  const { ref, chart } = useChart(result.interval)
+export interface Curve {
+  values: number[] // growth of 1, one per period
+  color: string
+  width?: 1 | 2
+  style?: LineStyle
+}
+
+// Cumulative-return lines over rebalance periods; each period's return lands at the next rebalance
+export function CurvesChart({ interval, times, curves }: { interval: Interval | '1h'; times: number[]; curves: Curve[] }) {
+  const { ref, chart } = useChart(interval)
 
   useEffect(() => {
-    if (!chart) return
+    if (!chart || times.length < 2) return
     const fmt = { type: 'custom' as const, formatter: (v: number) => `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%` }
-    // Each period's return is realized at the next rebalance, so plot it there (first point = start, 0%)
-    const times = [...result.origin_times, result.origin_times.at(-1)! + (result.origin_times.at(-1)! - result.origin_times.at(-2)!)]
-    const line = (values: number[], color: string, width: 1 | 2, style: LineStyle) => {
-      const s = chart.addLineSeries({ color, lineWidth: width, lineStyle: style, priceFormat: fmt, priceLineVisible: false, lastValueVisible: false })
-      s.setData([0, ...values.map((v) => v - 1)].map((value, i) => ({ time: ts(times[i]), value })))
+    const at = [...times, times.at(-1)! + (times.at(-1)! - times.at(-2)!)]
+    const series = curves.map((c) => {
+      const s = chart.addLineSeries({
+        color: c.color, lineWidth: c.width ?? 1, lineStyle: c.style ?? LineStyle.Solid,
+        priceFormat: fmt, priceLineVisible: false, lastValueVisible: false,
+      })
+      s.setData([0, ...c.values.map((v) => v - 1)].map((value, i) => ({ time: ts(at[i]), value })))
       return s
-    }
-    const series = [line(result.universe.equity, COLORS.benchmark, 1, LineStyle.Dotted)]
-    for (const sig of result.signals) {
-      const color = sig.kind === 'factor' ? FACTOR_COLORS[sig.name as keyof typeof FACTOR_COLORS] : MODEL_COLORS[sig.name as keyof typeof MODEL_COLORS]
-      series.push(line(sig.equity, color, sig.name === selected ? 2 : 1, sig.kind === 'factor' ? LineStyle.Dashed : LineStyle.Solid))
-    }
+    })
     chart.timeScale().fitContent()
     return () => {
       removeAll(chart, series)
     }
-  }, [result, selected, chart])
+  }, [times, curves, chart])
 
   return <div ref={ref} className="chart chart-short" />
+}
+
+// Cumulative net long-short return of every signal, plus the equal-weight universe for scale
+export function LongShortChart({ result, selected }: { result: CrossSectionResponse; selected: string | null }) {
+  const curves = useMemo<Curve[]>(
+    () => [
+      { values: result.universe.equity, color: COLORS.benchmark, style: LineStyle.Dotted },
+      ...result.signals.map((s) => ({
+        values: s.equity,
+        color: signalColor(s.name),
+        width: (s.name === selected ? 2 : 1) as 1 | 2,
+        style: s.kind === 'factor' ? LineStyle.Dashed : LineStyle.Solid,
+      })),
+    ],
+    [result, selected],
+  )
+  return <CurvesChart interval={result.interval} times={result.origin_times} curves={curves} />
 }

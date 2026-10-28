@@ -75,12 +75,54 @@ class CrossSectionRequest(BaseModel):
     lookback: int = Field(64, ge=32, le=2048)
     # Bars between rebalances, and the forward return each ranking is scored on
     horizon: int = Field(5, ge=1, le=60)
-    periods: int = Field(24, ge=4, le=60)
+    periods: int = Field(24, ge=4, le=120)
     buckets: int = Field(3, ge=2, le=10)
     samples: int = Field(8, ge=1, le=50)
     temperature: float = Field(1.0, gt=0, le=2.0)
     top_p: float = Field(0.9, gt=0, le=1.0)
     cost_bps: float = Field(5.0, ge=0, le=100)
+
+
+Factor = Literal["momentum", "reversal"]
+
+
+class BlendSignal(BaseModel):
+    name: ModelName | Factor
+    # Negative flips a signal (rank its lowest scores highest)
+    weight: float = Field(1.0, ge=-5, le=5)
+
+
+class ConstructionParams(BaseModel):
+    method: Literal["equal", "inverse_vol", "mean_variance"] = "inverse_vol"
+    side: Literal["long_short", "long_only"] = "long_short"
+    select: float = Field(0.3, ge=0.05, le=1.0)
+    risk_window: int = Field(120, ge=20, le=250)
+    vol_target: float | None = Field(0.10, ge=0.01, le=1.0)
+    max_gross: float = Field(2.0, ge=0.25, le=4.0)
+    trade_rate: float = Field(1.0, ge=0.05, le=1.0)
+
+
+class PortfolioRequest(BaseModel):
+    """Blend signals, build a risk-aware portfolio each rebalance (see services/portfolio.py)."""
+
+    symbols: list[str] = Field(..., min_length=4, max_length=30)
+    interval: Literal["1d", "1h"] = "1d"
+    signals: list[BlendSignal] = Field([BlendSignal(name="reversal")], min_length=1, max_length=6)
+    weighting: Literal["manual", "ic"] = "manual"
+    ic_window: int = Field(12, ge=3, le=60)
+    construction: ConstructionParams = ConstructionParams()
+    lookback: int = Field(64, ge=32, le=2048)
+    horizon: int = Field(5, ge=1, le=60)
+    periods: int = Field(40, ge=4, le=120)
+    samples: int = Field(8, ge=1, le=50)
+    temperature: float = Field(1.0, gt=0, le=2.0)
+    top_p: float = Field(0.9, gt=0, le=1.0)
+    cost_bps: float = Field(5.0, ge=0, le=100)
+
+
+class RecipeSave(BaseModel):
+    trial_id: int
+    name: str = Field(..., min_length=1, max_length=60)
 
 
 class SimCreate(BaseModel):
@@ -94,8 +136,10 @@ class SimCreate(BaseModel):
     blind: bool = True
     commission_bps: float = Field(2.0, ge=0, le=100)
     slippage_bps: float = Field(5.0, ge=0, le=100)
-    bots: list[Literal["sma_cross", "kronos"]] = ["sma_cross"]
+    bots: list[Literal["sma_cross", "kronos", "portfolio"]] = ["sma_cross"]
     kronos_model: KronosName = "mini"
+    # Saved portfolio-lab recipe the portfolio bot runs (long-only in the Sim's cash account)
+    recipe_id: int | None = None
 
 
 class SimOrder(BaseModel):

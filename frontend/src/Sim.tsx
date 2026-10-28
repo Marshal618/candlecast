@@ -10,6 +10,7 @@ import {
   type SimPlayer,
   type SimState,
   type SimSummary,
+  type Trial,
 } from './api'
 import { PriceChart, RaceChart, type TimeLabel } from './charts'
 import { PLAYER_COLORS } from './theme'
@@ -22,6 +23,7 @@ const PLAYER_NAMES: Record<SimPlayer, string> = {
   buy_hold: 'buy & hold',
   sma_cross: 'sma 20/50',
   kronos: 'kronos bot',
+  portfolio: 'portfolio bot',
 }
 const SPEEDS = [
   { label: 'slow', ms: 1200 },
@@ -520,6 +522,19 @@ function SimSetup({
   const [slippage, setSlippage] = useState('5')
   const [bots, setBots] = useState<SimBot[]>(['sma_cross', 'kronos'])
   const [model, setModel] = useState<KronosName>('mini')
+  const [recipes, setRecipes] = useState<Trial[]>([])
+  const [recipeId, setRecipeId] = useState<number | null>(null)
+
+  useEffect(() => {
+    api.portfolio
+      .recipes()
+      .then((r) => {
+        setRecipes(r)
+        setRecipeId((cur) => cur ?? r[0]?.id ?? null)
+      })
+      .catch(() => {})
+  }, [])
+  const recipe = recipes.find((r) => r.id === recipeId)
 
   const toggleBot = (b: SimBot) => setBots((cur) => (cur.includes(b) ? cur.filter((x) => x !== b) : [...cur, b]))
 
@@ -595,9 +610,33 @@ function SimSetup({
             <button className={bots.includes('kronos') ? 'active' : ''} onClick={() => toggleBot('kronos')}>
               kronos bot
             </button>
+            <button
+              className={bots.includes('portfolio') ? 'active' : ''}
+              disabled={recipes.length === 0}
+              title={recipes.length === 0 ? 'save a recipe in the Portfolio tab first' : undefined}
+              onClick={() => toggleBot('portfolio')}
+            >
+              portfolio bot
+            </button>
           </div>
           <span className="muted small">kronos bot re-forecasts every 5 bars and holds what it rates ≥ 60% up</span>
         </label>
+        {bots.includes('portfolio') && (
+          <label>
+            portfolio recipe
+            <select className="field" value={recipeId ?? ''} onChange={(e) => setRecipeId(Number(e.target.value))}>
+              {recipes.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.name} ({r.config.interval}, every {r.config.horizon} bars)
+                </option>
+              ))}
+            </select>
+            <span className="muted small">
+              runs the recipe's final blend on this basket, long-only (the sim is a cash account)
+              {recipe && recipe.config.interval !== interval ? `. needs ${recipe.config.interval} bars` : ''}
+            </span>
+          </label>
+        )}
         <label>
           kronos model (bot + hints)
           <div className="segmented">
@@ -625,8 +664,9 @@ function SimSetup({
             blind,
             commission_bps: Number(commission) || 0,
             slippage_bps: Number(slippage) || 0,
-            bots,
+            bots: bots.filter((b) => b !== 'portfolio' || recipeId != null),
             kronos_model: model,
+            recipe_id: bots.includes('portfolio') ? recipeId : null,
           })
         }
       >

@@ -137,3 +137,21 @@ def test_crosssection_ranks_a_universe(client):
         assert -1 <= s["rank_ic"]["mean"] <= 1
         assert len(s["equity"]) == 6 and len(s["bucket_returns"]) == 3
     assert "rank_ic_residual" in d["signals"][0] and "rank_ic_residual" not in d["signals"][-1]
+
+
+def test_portfolio_lab_logs_trials_and_saves_a_recipe(client):
+    body = {
+        "symbols": ["XLE", "XLF", "XLK", "XLU", "XLV", "XLP"],
+        "signals": [{"name": "mini", "weight": 1}, {"name": "reversal", "weight": 1}],
+        "periods": 6, "samples": 3, "construction": {"risk_window": 60},
+    }
+    r = client.post("/api/portfolio", json=body)
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["periods"] == 6 and len(d["weights"][0]) == 6 and d["deflation"]["trials"] >= 1
+    assert abs(sum(d["weights"][-1])) < 1e-6  # long-short is dollar neutral
+    again = client.post("/api/portfolio", json=body).json()
+    assert again["trial_id"] == d["trial_id"]  # same config isn't a new trial (and hits the score cache)
+    saved = client.post("/api/portfolio/recipes", json={"trial_id": d["trial_id"], "name": "it"}).json()
+    assert saved["name"] == "it"
+    assert any(x["id"] == d["trial_id"] for x in client.get("/api/portfolio/recipes").json())

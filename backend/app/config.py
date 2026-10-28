@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     journal_path: Path = BACKEND_DIR / "data" / "journal.sqlite3"
     # Market replay game sessions and leaderboard
     sim_path: Path = BACKEND_DIR / "data" / "sim.sqlite3"
+    # Research forecast-score cache, portfolio trials and saved recipes
+    research_path: Path = BACKEND_DIR / "data" / "research.sqlite3"
     # Static frontend build to serve from FastAPI (for single-container deploys)
     frontend_dist: Path = BACKEND_DIR.parent / "frontend" / "dist"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"

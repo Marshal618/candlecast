@@ -954,3 +954,94 @@ button.link {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
+
+.tok-table tr.me td {
+  color: var(--text);
+  background: var(--panel);
+}
+
+/* ── portfolio lab ────────────────────────────────── */
+.blend {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 6px;
+}
+
+.blend-row {
+  display: grid;
+  grid-template-columns: 1fr 64px;
+  gap: 4px;
+}
+
+.blend-row button {
+  font-size: 11px;
+  text-align: left;
+  grid-column: 1 / -1;
+}
+
+.blend-row.on button {
+  grid-column: 1;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.blend-row .field {
+  padding: 3px 6px;
+}
+
+.deflation {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--down);
+  padding: 12px 14px;
+}
+
+.deflation.pass {
+  border-left-color: var(--up);
+}
+
+.deflation.fail .results-title {
+  color: var(--down);
+}
+
+.deflation.pass .results-title {
+  color: var(--up);
+}
+
+.deflation .save {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.deflation .save .field {
+  width: 160px;
+}
+
+.meter .span3 {
+  grid-column: 1 / -1;
+  margin-top: -4px;
+}
+
+.wbar {
+  display: inline-block;
+  height: 8px;
+  margin-right: 8px;
+  vertical-align: middle;
+  background: var(--up);
+  opacity: 0.6;
+}
+
+.wbar.neg {
+  background: var(--down);
+}
+
+@media (max-width: 800px) {
+  .deflation {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

@@ -1,8 +1,11 @@
 """Sim sessions: create a game, step it, take orders, give Kronos hints, keep a leaderboard.
 
 Each session stores its config, a frozen market snapshot, the action log and the cursor; state
-is rebuilt with `sim.simulate` on every request. Kronos bot decisions are computed once and
-memoized, so replays never call the model again.
+is rebuilt with `sim.simulate` on every request. Kronos and portfolio bot decisions are computed
+once and memoized, so replays never call the model again.
+
+The portfolio bot runs a saved Portfolio-lab recipe frozen into the game's config: its final blend
+weights, construction and model settings. The Sim is a cash account, so it always runs long-only.
 """
 
 import json
@@ -16,7 +19,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from app.services import sim
+from app.services import portfolio, sim
+from app.services.crosssection import FACTORS, factor_scores, model_scores
 from app.services.forecaster import FEATURES, summarize
 from app.services.market_data import CachedMarketData, closed_bars, future_timestamps, interval_delta
 
@@ -49,8 +53,11 @@ class SimError(Exception):
 
 
 class SimStore:
-    def __init__(self, path: Path, market: CachedMarketData, forecaster, now: Callable[[], float] = time.time):
-        self.path, self.market, self.forecaster, self.now = path, market, forecaster, now
+    def __init__(
+        self, path: Path, market: CachedMarketData, forecaster, now: Callable[[], float] = time.time,
+        recipes: Callable[[int], dict] | None = None,
+    ):
+        self.path, self.market, self.forecaster, self.now, self.recipes = path, market, forecaster, now, recipes
         self._lock = threading.Lock()
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
@@ -108,8 +115,10 @@ class SimStore:
         if cfg["blind"]:
             m = sim.rescale_market(m, WARMUP)
         bots = ["buy_hold"] + [b for b in cfg["bots"] if b != "buy_hold"]
+        recipe = self._recipe(cfg) if "portfolio" in bots else None
         config = {
             **cfg,
+            "recipe": recipe,
             "symbols": list(frames),
             "bots": bots,
             "tz": tzs,
@@ -125,14 +134,14 @@ class SimStore:
                 (sid, self.now(), json.dumps(config), json.dumps(m.to_json()), "[]", WARMUP, "{}"),
             )
         s = self._load(sid)
-        self._decide_kronos(s, [WARMUP])
+        self._decide(s, [WARMUP])
         return self.state(sid)
 
     def step(self, sid: str, bars: int) -> dict:
         s = self._load(sid)
         self._require_open(s)
         new = min(s["cursor"] + bars, s["config"]["end_index"])
-        self._decide_kronos(s, range(s["cursor"] + 1, new + 1))
+        self._decide(s, range(s["cursor"] + 1, new + 1))
         self._save(s, cursor=new)
         if new == s["config"]["end_index"]:
             return self.finish(sid)
@@ -275,6 +284,7 @@ class SimStore:
             "id": s["id"],
             "config": {k: cfg[k] for k in ("symbols", "interval", "cash", "length", "blind", "commission_bps",
                                             "slippage_bps", "bots", "kronos_model")},
+            "recipe": cfg.get("recipe") and {k: cfg["recipe"][k] for k in ("id", "name", "blend", "horizon")},
             "step": t - start,
             "time": self._time(s, t),
             "finished": finished,
@@ -292,7 +302,7 @@ class SimStore:
             ],
             "players": {p: {**v, **sim.performance(st["curves"][p], bpy)} for p, v in st["players"].items()},
             # The bot's readings would be free hints, so they're only shown once the game is over
-            "kronos": s["memo"].get(str(max((int(k) for k in s["memo"] if int(k) <= t), default=-1))) if finished else None,
+            "kronos": s["memo"].get(str(max((int(k) for k in s["memo"] if k.isdigit() and int(k) <= t), default=-1))) if finished else None,
             "result": s["result"],
         }
 
@@ -314,6 +324,9 @@ class SimStore:
             if bot == "kronos":
                 d = s["memo"].get(str(t))
                 return None if d is None else np.array(d["weights"])
+            if bot == "portfolio":
+                d = s["memo"].get("portfolio", {}).get(str(t))
+                return None if d is None else np.array(d)
             return None
 
         return sim.simulate(
@@ -347,6 +360,65 @@ class SimStore:
             {"open": m.o[rows, i], "high": m.h[rows, i], "low": m.l[rows, i], "close": m.c[rows, i], "volume": m.v[rows, i]},
             index=idx,
         )
+
+    def _recipe(self, cfg: dict) -> dict:
+        if cfg.get("recipe_id") is None or self.recipes is None:
+            raise SimError("Pick a saved portfolio recipe for the portfolio bot.")
+        try:
+            r = self.recipes(cfg["recipe_id"])
+        except KeyError as e:
+            raise SimError(f"No saved recipe #{cfg['recipe_id']}.") from e
+        c = r["config"]
+        if c["interval"] != cfg["interval"]:
+            raise SimError(f"Recipe '{r['name']}' was built on {c['interval']} bars; this game uses {cfg['interval']}.")
+        if c["lookback"] > WARMUP or c["construction"]["risk_window"] >= WARMUP:
+            raise SimError(f"Recipe '{r['name']}' needs more history than the Sim's {WARMUP}-bar warm-up.")
+        blend = {k: v for k, v in r["final_blend"].items() if v != 0}
+        return {
+            "id": r["id"], "name": r["name"], "blend": blend, "horizon": c["horizon"], "lookback": c["lookback"],
+            "samples": c["samples"], "temperature": c["temperature"], "top_p": c["top_p"],
+            "construction": {**c["construction"], "side": "long_only", "max_gross": min(c["construction"]["max_gross"], 1.0)},
+        }
+
+    def _decide(self, s: dict, bars) -> None:
+        self._decide_kronos(s, bars)
+        self._decide_portfolio(s, bars)
+
+    def _decide_portfolio(self, s: dict, bars) -> None:
+        """Run the recipe at each of its rebalance bars in `bars`, memoizing target weights."""
+        cfg = s["config"]
+        r = cfg.get("recipe")
+        if not r:
+            return
+        done = s["memo"].get("portfolio", {})
+        todo = [t for t in bars if (t - cfg["start_index"]) % r["horizon"] == 0 and str(t) not in done]
+        if not todo:
+            return
+        m, n = s["market"], len(cfg["symbols"])
+        c = portfolio.Construction(**r["construction"])
+        bpy = _bars_per_year(m.times)
+        out = dict(done)
+        prev = np.array(out[max(out, key=int)]) if out else np.zeros(n)
+        for t in sorted(todo):
+            hist = [m.c[: t + 1, i][~np.isnan(m.c[: t + 1, i])] for i in range(n)]
+            scores = factor_scores(hist, r["horizon"])
+            models = [k for k in r["blend"] if k not in FACTORS]
+            ctxs = {i: self._context(s, i, t, r["lookback"]) for i in range(n)}
+            ctxs = {i: x for i, x in ctxs.items() if x is not None}  # a symbol too new to forecast scores 0
+            if models and ctxs:
+                L = min(len(x) for x in ctxs.values())  # one batch needs equal lengths
+                batch = [x.tail(L) for x in ctxs.values()]
+                for k in models:
+                    scores[k] = np.zeros(n)
+                    scores[k][list(ctxs)] = model_scores(self.forecaster, batch, cfg["interval"], k, r["horizon"],
+                                                         r["samples"], r["temperature"], r["top_p"])
+            alpha = sum(w * portfolio.zranks(scores[k]) for k, w in r["blend"].items())
+            # Bars before a symbol listed have no price; count them as flat
+            rets = np.nan_to_num(np.diff(np.log(m.closes_ffill[max(0, t - c.risk_window) : t + 1]), axis=0))
+            target = portfolio.target_weights(alpha, portfolio.ledoit_wolf(rets), c, bpy)
+            prev = prev + c.trade_rate * (target - prev)
+            out[str(t)] = [float(x) for x in prev]
+        self._save(s, memo={**s["memo"], "portfolio": out})
 
     def _decide_kronos(self, s: dict, bars) -> None:
         """Compute and memoize the Kronos bot's decisions for any decision bars in `bars`."""

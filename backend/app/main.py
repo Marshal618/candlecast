@@ -8,10 +8,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.schemas import BacktestRequest, CrossSectionRequest, ForecastRequest, Interval, ModelName, SimCreate, SimHint, SimOrder, SimStep, StrategyRequest, TokensRequest
+from app.schemas import (
+    BacktestRequest,
+    CrossSectionRequest,
+    ForecastRequest,
+    Interval,
+    ModelName,
+    PortfolioRequest,
+    RecipeSave,
+    SimCreate,
+    SimHint,
+    SimOrder,
+    SimStep,
+    StrategyRequest,
+    TokensRequest,
+)
 from app.services import calibration
 from app.services.backtest import run_backtest
-from app.services.crosssection import run_crosssection
+from app.services.crosssection import FACTORS, ScoreCache, build_panel, run_crosssection
+from app.services.portfolio import Construction, TrialLog, run_portfolio, study_key
 from app.services.journal import Journal, forecast_entry
 from app.services.sim_session import SimError, SimStore
 from app.services.forecaster import MAX_CONTEXT, Forecaster, Timer, summarize
@@ -27,7 +42,9 @@ from app.services.market_data import (
 market = CachedMarketData(YFinanceProvider(), settings.cache_path)
 forecaster = Forecaster(settings.device, settings.inference_batch_size)
 journal = Journal(settings.journal_path, market)
-sims = SimStore(settings.sim_path, market, forecaster)
+scores = ScoreCache(settings.research_path)
+trials = TrialLog(settings.research_path)
+sims = SimStore(settings.sim_path, market, forecaster, recipes=trials.recipe)
 
 
 @asynccontextmanager
@@ -214,16 +231,21 @@ async def tokens(req: TokensRequest):
     return {"symbol": req.symbol.upper(), "interval": req.interval, "model": req.model, "latency_ms": round(t.ms), **result}
 
 
-@app.post("/api/crosssection")
-async def crosssection(req: CrossSectionRequest):
-    symbols = list(dict.fromkeys(s.strip().upper() for s in req.symbols if s.strip()))
+async def _universe(symbols: list[str], interval: str, models: list[str], lookback: int) -> dict:
+    """Closed bars for each distinct symbol, after checking every model can take the lookback."""
+    symbols = list(dict.fromkeys(s.strip().upper() for s in symbols if s.strip()))
     if len(symbols) < 4:
         raise HTTPException(422, "Need at least 4 distinct symbols to rank.")
-    for m in req.models:
-        _check_lookback(m, req.lookback, req.lookback)
+    for m in models:
+        _check_lookback(m, lookback, lookback)
     now = time.time()
-    loaded = await asyncio.gather(*(_load(s, req.interval) for s in symbols))
-    frames = {s: closed_bars(df, req.interval, now) for s, df in zip(symbols, loaded)}
+    loaded = await asyncio.gather(*(_load(s, interval) for s in symbols))
+    return {s: closed_bars(df, interval, now) for s, df in zip(symbols, loaded)}
+
+
+@app.post("/api/crosssection")
+async def crosssection(req: CrossSectionRequest):
+    frames = await _universe(req.symbols, req.interval, req.models, req.lookback)
     with Timer() as t:
         try:
             result = await run_in_threadpool(
@@ -240,11 +262,67 @@ async def crosssection(req: CrossSectionRequest):
                     temperature=req.temperature,
                     top_p=req.top_p,
                     cost_bps=req.cost_bps,
+                    cache=scores,
                 )
             )
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
     return {"interval": req.interval, "horizon": req.horizon, "buckets": req.buckets, "latency_ms": round(t.ms), **result}
+
+
+@app.post("/api/portfolio")
+async def portfolio(req: PortfolioRequest):
+    names = list(dict.fromkeys(s.name for s in req.signals))
+    models = [n for n in names if n not in FACTORS]
+    frames = await _universe(req.symbols, req.interval, models, req.lookback)
+    c = req.construction
+    with Timer() as t:
+        try:
+            panel = await run_in_threadpool(
+                lambda: build_panel(
+                    forecaster, frames, interval=req.interval, models=models, lookback=req.lookback,
+                    horizon=req.horizon, periods=req.periods, samples=req.samples, temperature=req.temperature,
+                    top_p=req.top_p, min_history=c.risk_window + 1, cache=scores,
+                )
+            )
+            result = run_portfolio(
+                panel,
+                {s.name: s.weight for s in req.signals},
+                weighting=req.weighting,
+                ic_window=req.ic_window,
+                construction=Construction(**c.model_dump()),
+                cost_bps=req.cost_bps,
+            )
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+    # Everything that shapes the result except the universe/interval/horizon, which define the study
+    config = req.model_dump(exclude={"symbols", "interval", "horizon"})
+    config["signals"] = [s for s in config["signals"] if s["name"] in names]
+    study = study_key(list(frames), req.interval, req.horizon)
+    trial_id, deflation = await run_in_threadpool(trials.record, study, {**config, "horizon": req.horizon, "interval": req.interval}, result)
+    leaders = await run_in_threadpool(trials.study, study)
+    return {
+        "interval": req.interval,
+        "horizon": req.horizon,
+        "latency_ms": round(t.ms),
+        "trial_id": trial_id,
+        "deflation": deflation,
+        "study": [{"id": r["id"], "name": r["name"], "config": r["config"], "metrics": r["metrics"]} for r in leaders[:10]],
+        **result,
+    }
+
+
+@app.get("/api/portfolio/recipes")
+async def recipes():
+    return await run_in_threadpool(trials.recipes)
+
+
+@app.post("/api/portfolio/recipes")
+async def save_recipe(req: RecipeSave):
+    try:
+        return await run_in_threadpool(trials.save, req.trial_id, req.name)
+    except KeyError as e:
+        raise HTTPException(404, f"No trial #{req.trial_id}.") from e
 
 
 @app.get("/api/journal")

@@ -96,13 +96,14 @@ docker compose up --build     # single container on :8000 serving API and built 
 
 ```
 backend/
-  app/main.py                 FastAPI routes: /api/health, /api/candles, /api/forecast, /api/backtest, /api/strategy, /api/tokens, /api/journal, /api/crosssection, /api/sim/*
+  app/main.py                 FastAPI routes: /api/health, /api/candles, /api/forecast, /api/backtest, /api/strategy, /api/tokens, /api/journal, /api/crosssection, /api/portfolio, /api/sim/*
   app/services/market_data.py yfinance provider, SQLite cache, future-timestamp projection
   app/services/forecaster.py  Kronos loading + independent sampled paths + quantile stats
   app/services/challengers.py naive / GARCH / Chronos-Bolt forecasters for comparison
   app/services/calibration.py conformal (CQR) calibration of forecast bands
   app/services/backtest.py    walk-forward evaluation with baselines
   app/services/crosssection.py universe ranking research: RankIC, bucket and long-short portfolios, factors
+  app/services/portfolio.py   portfolio lab: signal blend, Ledoit-Wolf risk, construction, deflated Sharpe
   app/services/sim.py         market replay engine: order fills, accounts, bots, performance
   app/services/sim_session.py game sessions, Kronos bot + hints, leaderboard
   app/services/journal.py     live forecast log, scoring of closed horizons, scorecard + calibration
@@ -113,6 +114,7 @@ frontend/
   src/App.tsx                 dashboard UI
   src/Sim.tsx                 market replay game UI
   src/Research.tsx            cross-sectional research UI
+  src/Portfolio.tsx           portfolio lab UI
   src/charts.tsx              lightweight-charts candle/forecast/backtest charts
 ```
 
@@ -190,6 +192,48 @@ that is short-term reversal, which its per-window normalization builds in. Only 
 5-day rebalances does anything survive once the factors are removed (residual t = 2.1), and the
 plain reversal factor does about as well for free. These are small samples (24–40 rebalances), so
 treat them as a starting point, not a verdict.
+
+## Portfolio lab
+
+The **Portfolio** tab turns Research-tab signals into a portfolio you could hold, walk-forward:
+
+1. **Blend.** Pick any of Kronos, the challengers, momentum and reversal, each with a weight
+   (negative flips a signal). Scores become z-scored cross-sectional ranks so different scales mix
+   fairly. "By trailing IC" weights each signal by its positive RankIC over past rebalances only.
+2. **Risk model.** Covariance of per-bar returns over a trailing window, shrunk toward a scaled
+   identity with the Ledoit & Wolf (2004) optimal intensity.
+3. **Construction.** Equal weight or inverse volatility on the top (and bottom) share of names, or
+   mean-variance (Σ⁻¹α, dollar-neutral for long-short). Long-short or long-only.
+4. **Sizing and trading.** Scaled to an annual volatility target, capped at a max gross exposure,
+   and moved only part of the way toward the target each rebalance (Gârleanu & Pedersen 2013),
+   which gives up some signal for much lower turnover.
+
+**Overfitting guard.** Every distinct configuration is logged as a trial for its universe,
+interval and horizon. The result shows the Deflated Sharpe Ratio (Bailey & López de Prado 2014):
+the probability that the Sharpe beats what the best of that many tries would reach by luck. The
+more variants you try, the higher the bar.
+
+**Forecast cache.** Model scores are cached per symbol, rebalance date and settings
+(`KD_RESEARCH_PATH`), shared with the Research tab. Only the first run pays for Kronos; changing
+construction afterwards is instant, and longer studies (up to 120 rebalances) only forecast new dates.
+
+**Into the Sim.** Save a run as a recipe, then pick "portfolio bot" when starting a Sim game. It
+runs the recipe's final blend weights and construction on the game's basket, long-only (the Sim is
+a cash account), re-deciding every recipe-horizon bars from visible history only.
+
+First runs on the 20 mega caps (60 weekly rebalances, 10% vol target, 5 bps, inverse vol unless noted):
+
+| Recipe | Ann. return | Sharpe | Max DD | Turnover | DSR (trials) |
+|---|---|---|---|---|---|
+| reversal, equal weight | 17.7% | 1.63 | −10.3% | 75% | 0.96 (1) |
+| kronos-mini | 12.1% | 1.27 | −4.9% | 79% | 0.89 (3) |
+| kronos-mini + reversal | 17.7% | 1.63 | −7.5% | 81% | 0.94 (4) |
+| mini + reversal + momentum, IC-weighted | 21.8% | 2.03 | −3.5% | 72% | 0.98 (5) |
+| mini + reversal, trade rate 0.5 | 8.8% | 1.47 | −2.7% | 35% | 0.89 (7) |
+
+60 rebalances is a little over a year, all in one market regime, so these numbers say the
+machinery works, not that the strategy does. IC weighting ended with about 0.44 Kronos-mini,
+0.56 reversal and no momentum.
 
 ## Band calibration
 

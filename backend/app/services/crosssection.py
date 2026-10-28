@@ -27,6 +27,11 @@ symbol traded. Models forecast `horizon` of each symbol's own bars, so for crypt
 universe the forecast covers slightly fewer calendar days than the return it is scored against.
 """
 
+import sqlite3
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from scipy.stats import rankdata
@@ -128,6 +133,136 @@ def _mean_rank_corr(a: np.ndarray, b: np.ndarray) -> float:
     return float(c.mean()) if len(c) else 0.0
 
 
+def factor_scores(histories: list[np.ndarray], horizon: int) -> dict[str, np.ndarray]:
+    """Momentum and reversal for each symbol from its own close history (last element = now).
+
+    A history too short for a factor scores 0 (neutral) on it.
+    """
+    mom_need = MOMENTUM_SKIP + MOMENTUM_BARS + 1
+    return {
+        "momentum": np.array([h[-1 - MOMENTUM_SKIP] / h[-mom_need] - 1 if len(h) >= mom_need else 0.0 for h in histories]),
+        "reversal": np.array([-(h[-1] / h[-1 - horizon] - 1) if len(h) > horizon else 0.0 for h in histories]),
+    }
+
+
+def model_scores(
+    forecaster: Forecaster, contexts: list[pd.DataFrame], interval: str, model: str, horizon: int,
+    samples: int, temperature: float, top_p: float,
+) -> np.ndarray:
+    """Median sampled return over the horizon for each context (the Forecast tab's expected return)."""
+    futures = [future_timestamps(c.index, interval, horizon) for c in contexts]
+    paths = forecaster.sample_paths(contexts, futures, model, samples, temperature, top_p)
+    last = np.array([c["close"].iloc[-1] for c in contexts])
+    return np.median(paths[:, :, -1, FEATURES.index("close")], axis=1) / last - 1
+
+
+class ScoreCache:
+    """Model scores per (symbol, origin bar, settings), so re-runs and longer studies only pay for new forecasts.
+
+    Kronos is seeded per call, so a cached score can differ slightly from what a fresh batch would
+    sample; the cache keeps the first one, which keeps every later run consistent with it.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._lock = threading.Lock()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS scores (key TEXT PRIMARY KEY, score REAL NOT NULL)")
+
+    def get(self, keys: list[str]) -> dict[str, float]:
+        out = {}
+        with self._lock, sqlite3.connect(self.path) as conn:
+            for k in range(0, len(keys), 500):
+                chunk = keys[k : k + 500]
+                q = f"SELECT key, score FROM scores WHERE key IN ({','.join('?' * len(chunk))})"
+                out.update(conn.execute(q, chunk).fetchall())
+        return out
+
+    def put(self, items: dict[str, float]) -> None:
+        with self._lock, sqlite3.connect(self.path) as conn:
+            conn.executemany("INSERT OR IGNORE INTO scores (key, score) VALUES (?, ?)", items.items())
+
+
+@dataclass
+class Panel:
+    """Walk-forward cross-section: scores and realized forward returns per (rebalance, symbol)."""
+
+    symbols: list[str]
+    interval: str
+    horizon: int
+    origin_times: list[int]
+    fwd: np.ndarray  # (periods, symbols) return from each origin's close to `horizon` common bars later
+    signals: dict[str, np.ndarray]  # name -> (periods, symbols), factors first, then models
+    closes: np.ndarray  # (common bars, symbols) closes on the shared calendar, for risk models
+    origins: list[int]  # row of each rebalance in `closes`
+    bars_per_year: float
+
+    @property
+    def periods_per_year(self) -> float:
+        return self.bars_per_year / self.horizon
+
+
+def build_panel(
+    forecaster: Forecaster,
+    frames: dict[str, pd.DataFrame],
+    *,
+    interval: str,
+    models: list[str],
+    lookback: int,
+    horizon: int,
+    periods: int,
+    samples: int,
+    temperature: float,
+    top_p: float,
+    min_history: int = 0,
+    cache: ScoreCache | None = None,
+) -> Panel:
+    symbols = list(frames)
+    keys = {s: align_keys(f.index, interval) for s, f in frames.items()}
+    common = sorted(set.intersection(*(set(k) for k in keys.values())))
+    need = max(lookback, MOMENTUM_BARS + MOMENTUM_SKIP + 1, horizon + 1, min_history)
+
+    # Position of each common date's bar in each symbol's own frame (last bar with that key)
+    pos = {s: np.searchsorted(keys[s], common, side="right") - 1 for s in symbols}
+    last_origin = len(common) - 1 - horizon
+    origins = [
+        o for o in range(last_origin, -1, -horizon)
+        if o + 1 >= min_history and all(pos[s][o] + 1 >= need for s in symbols)
+    ][:periods][::-1]
+    if len(origins) < 4:
+        raise ValueError(
+            f"Only {len(origins)} rebalance dates have {need} bars of history for every symbol; need at least 4. "
+            "Drop the newest listings, shorten the lookback, or use fewer rebalances."
+        )
+
+    own = {s: frames[s]["close"].to_numpy(dtype=float) for s in symbols}
+    closes = np.column_stack([own[s][pos[s]] for s in symbols])
+    fwd = closes[np.array(origins) + horizon] / closes[origins] - 1
+    per = [factor_scores([own[s][: pos[s][o] + 1] for s in symbols], horizon) for o in origins]
+    signals: dict[str, np.ndarray] = {f: np.array([p[f] for p in per]) for f in FACTORS}
+
+    contexts = [frames[s].iloc[pos[s][o] + 1 - lookback : pos[s][o] + 1] for o in origins for s in symbols]
+    for m in models:
+        key = [f"{s}|{interval}|{int(c.index[-1].timestamp())}|{m}|{lookback}|{horizon}|{samples}|{temperature}|{top_p}"
+               for c, s in zip(contexts, symbols * len(origins))]
+        hit = cache.get(key) if cache else {}
+        todo = [k for k, kk in enumerate(key) if kk not in hit]
+        if todo:
+            fresh = model_scores(forecaster, [contexts[k] for k in todo], interval, m, horizon, samples, temperature, top_p)
+            new = {key[k]: float(v) for k, v in zip(todo, fresh)}
+            if cache:
+                cache.put(new)
+            hit = {**hit, **new}
+        signals[m] = np.array([hit[k] for k in key]).reshape(len(origins), len(symbols))
+
+    return Panel(
+        symbols=symbols, interval=interval, horizon=horizon,
+        origin_times=[int(common[o].timestamp()) for o in origins], fwd=fwd, signals=signals,
+        closes=closes, origins=origins, bars_per_year=bars_per_year(pd.DatetimeIndex(common)),
+    )
+
+
 def run_crosssection(
     forecaster: Forecaster,
     frames: dict[str, pd.DataFrame],
@@ -142,51 +277,19 @@ def run_crosssection(
     temperature: float,
     top_p: float,
     cost_bps: float,
+    cache: ScoreCache | None = None,
 ) -> dict:
-    symbols = list(frames)
-    if buckets > len(symbols):
-        raise ValueError(f"{buckets} buckets need at least {buckets} symbols; got {len(symbols)}.")
-    keys = {s: align_keys(f.index, interval) for s, f in frames.items()}
-    common = sorted(set.intersection(*(set(k) for k in keys.values())))
-    need = max(lookback, MOMENTUM_BARS + MOMENTUM_SKIP + 1, horizon + 1)
-
-    # Position of each common date's bar in each symbol's own frame (last bar with that key)
-    pos = {s: np.searchsorted(keys[s], common, side="right") - 1 for s in symbols}
-    last_origin = len(common) - 1 - horizon
-    origins = [o for o in range(last_origin, -1, -horizon) if all(pos[s][o] + 1 >= need for s in symbols)][:periods][::-1]
-    if len(origins) < 4:
-        raise ValueError(
-            f"Only {len(origins)} rebalance dates have {need} bars of history for every symbol; need at least 4. "
-            "Drop the newest listings or shorten the lookback."
-        )
-
-    closes = {s: frames[s]["close"].to_numpy(dtype=float) for s in symbols}
-
-    def at(s: str, o: int, back: int = 0) -> float:
-        return closes[s][pos[s][o] - back]
-
-    fwd = np.array([[at(s, o + horizon) / at(s, o) - 1 for s in symbols] for o in origins])
-    signals: dict[str, np.ndarray] = {
-        "momentum": np.array(
-            [[at(s, o, MOMENTUM_SKIP) / at(s, o, MOMENTUM_SKIP + MOMENTUM_BARS) - 1 for s in symbols] for o in origins]
-        ),
-        "reversal": np.array([[-(at(s, o) / at(s, o, horizon) - 1) for s in symbols] for o in origins]),
-    }
-
-    contexts = [frames[s].iloc[pos[s][o] + 1 - lookback : pos[s][o] + 1] for o in origins for s in symbols]
-    futures = [future_timestamps(c.index, interval, horizon) for c in contexts]
-    last = np.array([c["close"].iloc[-1] for c in contexts])
-    for m in models:
-        paths = forecaster.sample_paths(contexts, futures, m, samples, temperature, top_p)
-        final = paths[:, :, -1, FEATURES.index("close")]
-        signals[m] = (np.median(final, axis=1) / last - 1).reshape(len(origins), len(symbols))
-
-    origin_times = [int(common[o].timestamp()) for o in origins]
-    ppy = bars_per_year(pd.DatetimeIndex(common)) / horizon
+    if buckets > len(frames):
+        raise ValueError(f"{buckets} buckets need at least {buckets} symbols; got {len(frames)}.")
+    p = build_panel(
+        forecaster, frames, interval=interval, models=models, lookback=lookback, horizon=horizon,
+        periods=periods, samples=samples, temperature=temperature, top_p=top_p, cache=cache,
+    )
+    signals, fwd = p.signals, p.fwd
     universe = np.cumprod(1 + fwd.mean(axis=1))
     out = []
     for name, score in signals.items():
-        r = evaluate(score, fwd, buckets, cost_bps, ppy)
+        r = evaluate(score, fwd, buckets, cost_bps, p.periods_per_year)
         r["name"] = name
         r["kind"] = "factor" if name in FACTORS else "model"
         r["corr"] = {f: _mean_rank_corr(score, signals[f]) for f in FACTORS if f != name}
@@ -198,10 +301,10 @@ def run_crosssection(
     # Models first, in request order, then the factors
     out.sort(key=lambda r: (r["kind"] == "factor", models.index(r["name"]) if r["name"] in models else FACTORS.index(r["name"])))
     return {
-        "symbols": symbols,
-        "periods": len(origins),
-        "origin_times": origin_times,
-        "periods_per_year": ppy,
+        "symbols": p.symbols,
+        "periods": len(p.origins),
+        "origin_times": p.origin_times,
+        "periods_per_year": p.periods_per_year,
         "universe": {"equity": [float(x) for x in universe], "mean": float(fwd.mean())},
         "dispersion": float(fwd.std(axis=1).mean()),
         "signals": out,
