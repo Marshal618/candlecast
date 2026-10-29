@@ -155,3 +155,26 @@ def test_portfolio_lab_logs_trials_and_saves_a_recipe(client):
     saved = client.post("/api/portfolio/recipes", json={"trial_id": d["trial_id"], "name": "it"}).json()
     assert saved["name"] == "it"
     assert any(x["id"] == d["trial_id"] for x in client.get("/api/portfolio/recipes").json())
+
+
+def test_crosssection_with_point_in_time_fundamentals(client):
+    r = client.post(
+        "/api/crosssection",
+        json={"symbols": ["AAPL", "MSFT", "JPM", "XOM", "XLK"], "models": ["naive"], "periods": 8,
+              "samples": 2, "fundamentals": ["surprise", "revisions", "value", "size"]},
+    )
+    assert r.status_code == 200, r.text
+    sig = {s["name"]: s for s in r.json()["signals"]}
+    for f in ("surprise", "revisions", "value", "size"):
+        assert sig[f]["kind"] == "fundamental"
+        assert 0 < sig[f]["coverage"] <= 0.8  # XLK is a fund: never covered
+
+
+def test_volatility_scores_models_against_ewma(client):
+    r = client.post("/api/volatility", json={"symbols": ["SPY", "TLT"], "models": ["garch", "naive"], "periods": 8, "samples": 8})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert [f["name"] for f in d["forecasts"]] == ["garch", "naive", "ewma"]
+    assert d["scored_periods"] == 5 and len(d["realized"]) == 8 and len(d["realized"][0]) == 2
+    for f in d["forecasts"]:
+        assert f["qlike_cal"] >= 0 and 0 <= f["mz_r2"] <= 1 and f["vol_ratio"] > 0

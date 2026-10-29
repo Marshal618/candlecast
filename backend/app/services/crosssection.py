@@ -10,6 +10,7 @@ Walk-forward, at each rebalance date (every `horizon` bars, non-overlapping):
 2. Two classic price factors are scored alongside, with no model calls:
    - momentum: the 60-bar return skipping the latest 5 bars (Jegadeesh & Titman 1993)
    - reversal: minus the return over the last `horizon` bars (Lehmann 1990, Jegadeesh 1990)
+   Optionally, non-price fundamentals rebuilt point-in-time (see services/fundamentals.py).
 3. Each score is compared with the realized forward return across symbols:
    - IC: Pearson correlation of score and return; RankIC: Spearman (the Kronos paper's metric).
      ICIR = mean / std; t = ICIR * sqrt(periods). |t| > 2 is the usual bar for "probably real".
@@ -20,7 +21,7 @@ Walk-forward, at each rebalance date (every `horizon` bars, non-overlapping):
    finding something new or re-deriving a known effect (Kronos's per-window normalization
    predicts mean reversion, so a high correlation with reversal is expected). Residual RankIC
    regresses the factors' ranks out of the model's ranks each period and scores what remains:
-   the model's skill beyond momentum and reversal.
+   the model's (or fundamental's) skill beyond momentum and reversal.
 
 Symbols are aligned by calendar date (daily) or UTC hour (hourly), and rebalances use dates every
 symbol traded. Models forecast `horizon` of each symbol's own bars, so for crypto in a stock
@@ -37,6 +38,7 @@ import pandas as pd
 from scipy.stats import rankdata
 
 from app.services.forecaster import FEATURES, Forecaster
+from app.services.fundamentals import FUNDAMENTALS, Fundamentals, fill_missing, fundamental_scores
 from app.services.market_data import future_timestamps
 from app.services.sim import align_keys
 from app.services.strategy import _max_drawdown, _sharpe, bars_per_year
@@ -145,15 +147,33 @@ def factor_scores(histories: list[np.ndarray], horizon: int) -> dict[str, np.nda
     }
 
 
+def model_stats(
+    forecaster: Forecaster, contexts: list[pd.DataFrame], interval: str, model: str, horizon: int,
+    samples: int, temperature: float, top_p: float,
+) -> dict[str, np.ndarray]:
+    """Two numbers per context from one set of sampled paths.
+
+    - ret: median sampled return over the horizon (the Forecast tab's expected return)
+    - var: variance across samples of the log return over the horizon, the model's volatility
+           forecast (scored in services/volatility.py)
+    """
+    futures = [future_timestamps(c.index, interval, horizon) for c in contexts]
+    paths = forecaster.sample_paths(contexts, futures, model, samples, temperature, top_p)
+    last = np.array([c["close"].iloc[-1] for c in contexts])
+    final = paths[:, :, -1, FEATURES.index("close")]
+    log_r = np.log(np.maximum(final, 1e-12) / last[:, None])
+    return {
+        "ret": np.median(final, axis=1) / last - 1,
+        "var": log_r.var(axis=1, ddof=1) if samples > 1 else np.zeros(len(contexts)),
+    }
+
+
 def model_scores(
     forecaster: Forecaster, contexts: list[pd.DataFrame], interval: str, model: str, horizon: int,
     samples: int, temperature: float, top_p: float,
 ) -> np.ndarray:
     """Median sampled return over the horizon for each context (the Forecast tab's expected return)."""
-    futures = [future_timestamps(c.index, interval, horizon) for c in contexts]
-    paths = forecaster.sample_paths(contexts, futures, model, samples, temperature, top_p)
-    last = np.array([c["close"].iloc[-1] for c in contexts])
-    return np.median(paths[:, :, -1, FEATURES.index("close")], axis=1) / last - 1
+    return model_stats(forecaster, contexts, interval, model, horizon, samples, temperature, top_p)["ret"]
 
 
 class ScoreCache:
@@ -184,6 +204,72 @@ class ScoreCache:
             conn.executemany("INSERT OR IGNORE INTO scores (key, score) VALUES (?, ?)", items.items())
 
 
+def cached_stat(
+    forecaster: Forecaster, cache: "ScoreCache | None", contexts: list[pd.DataFrame], symbols: list[str],
+    stat: str, *, interval: str, model: str, lookback: int, horizon: int, samples: int, temperature: float, top_p: float,
+) -> np.ndarray:
+    """One model_stats stat per context (contexts cycle through `symbols`), forecasting only cache misses.
+
+    Both stats of every fresh forecast are stored, so a research run warms the volatility test and
+    vice versa. Return scores keep the original key format, so older caches stay valid.
+    """
+    def key(c, s, st):
+        base = f"{s}|{interval}|{int(c.index[-1].timestamp())}|{model}|{lookback}|{horizon}|{samples}|{temperature}|{top_p}"
+        return base if st == "ret" else f"{base}|{st}"
+
+    owners = symbols * (len(contexts) // len(symbols))
+    want = [key(c, s, stat) for c, s in zip(contexts, owners)]
+    hit = cache.get(want) if cache else {}
+    todo = [k for k, kk in enumerate(want) if kk not in hit]
+    if todo:
+        fresh = model_stats(forecaster, [contexts[k] for k in todo], interval, model, horizon, samples, temperature, top_p)
+        new = {key(contexts[k], owners[k], st): float(v) for st, vals in fresh.items() for k, v in zip(todo, vals)}
+        if cache:
+            cache.put(new)
+        hit = {**hit, **{k: new[k] for k in (want[j] for j in todo)}}
+    return np.array([hit[k] for k in want])
+
+
+@dataclass
+class Schedule:
+    """Walk-forward rebalance dates on the calendar every symbol shares."""
+
+    symbols: list[str]
+    common: list[pd.Timestamp]  # shared-clock bar keys (see sim.align_keys)
+    pos: dict[str, np.ndarray]  # per symbol: row in its own frame of each common bar
+    origins: list[int]  # rebalance rows in `common`, oldest first
+
+    def contexts(self, frames: dict[str, pd.DataFrame], lookback: int) -> list[pd.DataFrame]:
+        """The `lookback` bars up to each origin, origin-major then symbol."""
+        return [frames[s].iloc[self.pos[s][o] + 1 - lookback : self.pos[s][o] + 1] for o in self.origins for s in self.symbols]
+
+    def closes(self, frames: dict[str, pd.DataFrame]) -> np.ndarray:
+        return np.column_stack([frames[s]["close"].to_numpy(dtype=float)[self.pos[s]] for s in self.symbols])
+
+
+def schedule(
+    frames: dict[str, pd.DataFrame], *, interval: str, lookback: int, horizon: int, periods: int, min_history: int = 0
+) -> Schedule:
+    symbols = list(frames)
+    keys = {s: align_keys(f.index, interval) for s, f in frames.items()}
+    common = sorted(set.intersection(*(set(k) for k in keys.values())))
+    need = max(lookback, MOMENTUM_BARS + MOMENTUM_SKIP + 1, horizon + 1, min_history)
+
+    # Position of each common date's bar in each symbol's own frame (last bar with that key)
+    pos = {s: np.searchsorted(keys[s], common, side="right") - 1 for s in symbols}
+    last_origin = len(common) - 1 - horizon
+    origins = [
+        o for o in range(last_origin, -1, -horizon)
+        if o + 1 >= min_history and all(pos[s][o] + 1 >= need for s in symbols)
+    ][:periods][::-1]
+    if len(origins) < 4:
+        raise ValueError(
+            f"Only {len(origins)} rebalance dates have {need} bars of history for every symbol; need at least 4. "
+            "Drop the newest listings, shorten the lookback, or use fewer rebalances."
+        )
+    return Schedule(symbols, common, pos, origins)
+
+
 @dataclass
 class Panel:
     """Walk-forward cross-section: scores and realized forward returns per (rebalance, symbol)."""
@@ -193,10 +279,11 @@ class Panel:
     horizon: int
     origin_times: list[int]
     fwd: np.ndarray  # (periods, symbols) return from each origin's close to `horizon` common bars later
-    signals: dict[str, np.ndarray]  # name -> (periods, symbols), factors first, then models
+    signals: dict[str, np.ndarray]  # name -> (periods, symbols): price factors, fundamentals, then models
     closes: np.ndarray  # (common bars, symbols) closes on the shared calendar, for risk models
     origins: list[int]  # row of each rebalance in `closes`
     bars_per_year: float
+    coverage: dict[str, float] | None = None  # share of cells each fundamental had real data for
 
     @property
     def periods_per_year(self) -> float:
@@ -217,49 +304,38 @@ def build_panel(
     top_p: float,
     min_history: int = 0,
     cache: ScoreCache | None = None,
+    fundamentals: dict[str, Fundamentals] | None = None,
+    use_fundamentals: list[str] = (),
 ) -> Panel:
-    symbols = list(frames)
-    keys = {s: align_keys(f.index, interval) for s, f in frames.items()}
-    common = sorted(set.intersection(*(set(k) for k in keys.values())))
-    need = max(lookback, MOMENTUM_BARS + MOMENTUM_SKIP + 1, horizon + 1, min_history)
-
-    # Position of each common date's bar in each symbol's own frame (last bar with that key)
-    pos = {s: np.searchsorted(keys[s], common, side="right") - 1 for s in symbols}
-    last_origin = len(common) - 1 - horizon
-    origins = [
-        o for o in range(last_origin, -1, -horizon)
-        if o + 1 >= min_history and all(pos[s][o] + 1 >= need for s in symbols)
-    ][:periods][::-1]
-    if len(origins) < 4:
-        raise ValueError(
-            f"Only {len(origins)} rebalance dates have {need} bars of history for every symbol; need at least 4. "
-            "Drop the newest listings, shorten the lookback, or use fewer rebalances."
-        )
-
+    sc = schedule(frames, interval=interval, lookback=lookback, horizon=horizon, periods=periods, min_history=min_history)
+    symbols, origins, pos = sc.symbols, sc.origins, sc.pos
     own = {s: frames[s]["close"].to_numpy(dtype=float) for s in symbols}
-    closes = np.column_stack([own[s][pos[s]] for s in symbols])
+    closes = sc.closes(frames)
     fwd = closes[np.array(origins) + horizon] / closes[origins] - 1
     per = [factor_scores([own[s][: pos[s][o] + 1] for s in symbols], horizon) for o in origins]
     signals: dict[str, np.ndarray] = {f: np.array([p[f] for p in per]) for f in FACTORS}
 
-    contexts = [frames[s].iloc[pos[s][o] + 1 - lookback : pos[s][o] + 1] for o in origins for s in symbols]
+    coverage = None
+    if use_fundamentals:
+        funds = [(fundamentals or {}).get(s) or Fundamentals.empty() for s in symbols]
+        rows = [fundamental_scores(funds, int(sc.common[o].timestamp()), interval, closes[o]) for o in origins]
+        coverage = {}
+        for f in use_fundamentals:
+            raw = np.array([r[f] for r in rows])
+            coverage[f] = float(np.isfinite(raw).mean())
+            signals[f] = fill_missing(raw)
+
+    contexts = sc.contexts(frames, lookback)
     for m in models:
-        key = [f"{s}|{interval}|{int(c.index[-1].timestamp())}|{m}|{lookback}|{horizon}|{samples}|{temperature}|{top_p}"
-               for c, s in zip(contexts, symbols * len(origins))]
-        hit = cache.get(key) if cache else {}
-        todo = [k for k, kk in enumerate(key) if kk not in hit]
-        if todo:
-            fresh = model_scores(forecaster, [contexts[k] for k in todo], interval, m, horizon, samples, temperature, top_p)
-            new = {key[k]: float(v) for k, v in zip(todo, fresh)}
-            if cache:
-                cache.put(new)
-            hit = {**hit, **new}
-        signals[m] = np.array([hit[k] for k in key]).reshape(len(origins), len(symbols))
+        signals[m] = cached_stat(
+            forecaster, cache, contexts, symbols, "ret", interval=interval, model=m, lookback=lookback,
+            horizon=horizon, samples=samples, temperature=temperature, top_p=top_p,
+        ).reshape(len(origins), len(symbols))
 
     return Panel(
         symbols=symbols, interval=interval, horizon=horizon,
-        origin_times=[int(common[o].timestamp()) for o in origins], fwd=fwd, signals=signals,
-        closes=closes, origins=origins, bars_per_year=bars_per_year(pd.DatetimeIndex(common)),
+        origin_times=[int(sc.common[o].timestamp()) for o in origins], fwd=fwd, signals=signals,
+        closes=closes, origins=origins, bars_per_year=bars_per_year(pd.DatetimeIndex(sc.common)), coverage=coverage,
     )
 
 
@@ -278,12 +354,15 @@ def run_crosssection(
     top_p: float,
     cost_bps: float,
     cache: ScoreCache | None = None,
+    fundamentals: dict[str, Fundamentals] | None = None,
+    use_fundamentals: list[str] = (),
 ) -> dict:
     if buckets > len(frames):
         raise ValueError(f"{buckets} buckets need at least {buckets} symbols; got {len(frames)}.")
     p = build_panel(
         forecaster, frames, interval=interval, models=models, lookback=lookback, horizon=horizon,
         periods=periods, samples=samples, temperature=temperature, top_p=top_p, cache=cache,
+        fundamentals=fundamentals, use_fundamentals=use_fundamentals,
     )
     signals, fwd = p.signals, p.fwd
     universe = np.cumprod(1 + fwd.mean(axis=1))
@@ -291,15 +370,18 @@ def run_crosssection(
     for name, score in signals.items():
         r = evaluate(score, fwd, buckets, cost_bps, p.periods_per_year)
         r["name"] = name
-        r["kind"] = "factor" if name in FACTORS else "model"
+        r["kind"] = "factor" if name in FACTORS else "fundamental" if name in FUNDAMENTALS else "model"
         r["corr"] = {f: _mean_rank_corr(score, signals[f]) for f in FACTORS if f != name}
+        if name in FUNDAMENTALS:
+            r["coverage"] = p.coverage[name]
         if name not in FACTORS:
             # What's left of the ranking once momentum and reversal are accounted for
             resid = residual_scores(score, [signals[f] for f in FACTORS])
             r["rank_ic_residual"] = _ic_stats(_rowwise_corr(_ranks(resid), _ranks(fwd)))
         out.append(r)
-    # Models first, in request order, then the factors
-    out.sort(key=lambda r: (r["kind"] == "factor", models.index(r["name"]) if r["name"] in models else FACTORS.index(r["name"])))
+    # Models first, in request order, then fundamentals, then the price factors
+    order = [*models, *FUNDAMENTALS, *FACTORS]
+    out.sort(key=lambda r: order.index(r["name"]))
     return {
         "symbols": p.symbols,
         "periods": len(p.origins),

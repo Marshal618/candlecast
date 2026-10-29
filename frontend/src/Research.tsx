@@ -4,22 +4,22 @@ import {
   type Challenger,
   type CrossSectionResponse,
   type CrossSectionSignal,
-  type Factor,
+  type Fundamental,
   type IcStats,
   type KronosName,
   type ModelName,
 } from './api'
 import { LongShortChart } from './charts'
-import { FACTOR_COLORS, FACTOR_LABELS, MODEL_COLORS, MODEL_LABELS } from './theme'
+import { FUNDAMENTAL_HINTS, MODEL_COLORS, signalColor, signalLabel } from './theme'
 import { pct, rate } from './format'
 import { Slider, Stat } from './ui'
 import { UNIVERSES } from './universes'
 
 const CHALLENGERS: Challenger[] = ['naive', 'garch', 'chronos']
+const FUNDAMENTALS: Fundamental[] = ['surprise', 'revisions', 'value', 'size']
 
-const isFactor = (s: CrossSectionSignal): s is CrossSectionSignal & { name: Factor } => s.kind === 'factor'
-const label = (s: CrossSectionSignal) => (isFactor(s) ? FACTOR_LABELS[s.name] : MODEL_LABELS[s.name as ModelName])
-const color = (s: CrossSectionSignal) => (isFactor(s) ? FACTOR_COLORS[s.name] : MODEL_COLORS[s.name as ModelName])
+const label = (s: CrossSectionSignal) => signalLabel(s.name)
+const color = (s: CrossSectionSignal) => signalColor(s.name)
 const num = (x: number, d = 3) => (x >= 0 ? '+' : '') + x.toFixed(d)
 // |t| > 2 is the conventional "unlikely to be luck" bar for a mean IC
 const tone = (s: IcStats) => (s.t_stat >= 2 ? 'up' : s.t_stat <= -2 ? 'down' : '')
@@ -29,6 +29,7 @@ export function ResearchView({ onError }: { onError: (msg: string | null) => voi
   const [interval, setBarInterval] = useState<'1d' | '1h'>('1d')
   const [kronos, setKronos] = useState<KronosName | null>('mini')
   const [rivals, setRivals] = useState<Challenger[]>(['naive', 'garch', 'chronos'])
+  const [funds, setFunds] = useState<Fundamental[]>([])
   const [horizon, setHorizon] = useState(5)
   const [periods, setPeriods] = useState(24)
   const [buckets, setBuckets] = useState(3)
@@ -42,6 +43,7 @@ export function ResearchView({ onError }: { onError: (msg: string | null) => voi
   const list = [...new Set(symbols.split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean))]
   const models: ModelName[] = [...(kronos ? [kronos] : []), ...rivals]
   const toggleRival = (m: Challenger) => setRivals((cur) => (cur.includes(m) ? cur.filter((x) => x !== m) : [...cur, m]))
+  const toggleFund = (f: Fundamental) => setFunds((cur) => (cur.includes(f) ? cur.filter((x) => x !== f) : [...cur, f]))
 
   const run = async () => {
     setBusy(true)
@@ -57,6 +59,7 @@ export function ResearchView({ onError }: { onError: (msg: string | null) => voi
         buckets: Math.min(buckets, list.length),
         samples,
         cost_bps: Number(cost) || 0,
+        fundamentals: funds,
       })
       setResult(r)
       setSelected(r.signals[0]?.name ?? null)
@@ -121,6 +124,17 @@ export function ResearchView({ onError }: { onError: (msg: string | null) => voi
               ))}
             </div>
           </label>
+          <label>
+            fundamentals (stocks only, point-in-time)
+            <div className="rivals">
+              {FUNDAMENTALS.map((f) => (
+                <button key={f} className={funds.includes(f) ? 'active' : ''} onClick={() => toggleFund(f)} title={FUNDAMENTAL_HINTS[f]}>
+                  <i className="dot" style={{ background: signalColor(f) }} />
+                  {signalLabel(f)}
+                </button>
+              ))}
+            </div>
+          </label>
           <Slider label="rebalance every (bars)" value={horizon} min={1} max={60} onChange={setHorizon} />
           <Slider label="rebalances" value={periods} min={4} max={60} onChange={setPeriods} />
           <Slider label="buckets" value={Math.min(buckets, Math.max(list.length, 2))} min={2} max={Math.max(2, Math.min(10, list.length))} onChange={setBuckets} />
@@ -168,6 +182,11 @@ export function ResearchView({ onError }: { onError: (msg: string | null) => voi
                 <tr key={s.name} className={s.name === sel.name ? 'me' : ''} onClick={() => setSelected(s.name)}>
                   <td>
                     <i className="dot" style={{ background: color(s) }} /> {label(s)}
+                    {s.coverage != null && (
+                      <span className="muted" title="share of (rebalance, symbol) cells with real data; gaps sit mid-ranking">
+                        {' '}· {rate(s.coverage)} covered
+                      </span>
+                    )}
                   </td>
                   <td className={tone(s.rank_ic)}>{num(s.rank_ic.mean)}</td>
                   <td className={tone(s.rank_ic)}>{num(s.rank_ic.t_stat, 2)}</td>
@@ -188,7 +207,8 @@ export function ResearchView({ onError }: { onError: (msg: string | null) => voi
           <p className="muted small">
             rank ic = spearman correlation between a signal's ranking and the realized next-{result.horizon}-bar returns,
             averaged over rebalances; green / red when |t| &gt; 2. "beyond factors" scores the ranking left after regressing
-            out momentum and reversal. l/s = long the top bucket, short the bottom, equal weight, net of costs. ρ = average
+            out momentum and reversal. fundamentals (dotted) only use data public by each rebalance; funds and crypto
+            have none. l/s = long the top bucket, short the bottom, equal weight, net of costs. ρ = average
             rank correlation with each factor. click a row for its buckets.
           </p>
 

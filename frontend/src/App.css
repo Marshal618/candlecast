@@ -1045,3 +1045,24 @@ button.link {
     align-items: stretch;
   }
 }
+
+/* Volatility: symbol picker and raw/calibrated switch inside a panel title */
+.field.inline {
+  width: auto;
+  padding: 2px 6px;
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.segmented.inline {
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+.segmented.inline button {
+  flex: none;
+  padding: 2px 8px;
+  text-transform: none;
+  letter-spacing: 0;
+}

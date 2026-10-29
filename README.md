@@ -29,6 +29,11 @@ the same way a language model predicts the next word.
 - **Sim (market replay game):** trade a basket of real tickers bar by bar with a pretend account
   against buy-and-hold, an SMA crossover bot and a Kronos bot, with fees, slippage, limit and stop
   orders. Blind mode hides dates. See [Sim](#sim-market-replay-game).
+- **Volatility test:** scores each model's sampled spread as a forecast of how much an asset will
+  move (QLIKE loss, calibrated, Diebold-Mariano vs an EWMA baseline). See [Volatility test](#volatility-test).
+- **Fundamentals:** earnings surprise, analyst revisions, earnings yield and size, rebuilt
+  point-in-time so they can be backtested in Research and blended in the Portfolio lab. See
+  [Non-price signals](#non-price-signals).
 - **Token inspector:** post-hoc look at how Kronos reads the chart as tokens: per-candle surprisal,
   next-token candidates and what they historically meant, reconstruction fidelity, which candle
   properties tokens actually encode, and occlusion attribution. See [Token inspector](#token-inspector).
@@ -96,13 +101,15 @@ docker compose up --build     # single container on :8000 serving API and built 
 
 ```
 backend/
-  app/main.py                 FastAPI routes: /api/health, /api/candles, /api/forecast, /api/backtest, /api/strategy, /api/tokens, /api/journal, /api/crosssection, /api/portfolio, /api/sim/*
+  app/main.py                 FastAPI routes: /api/health, /api/candles, /api/forecast, /api/backtest, /api/strategy, /api/tokens, /api/journal, /api/crosssection, /api/volatility, /api/portfolio, /api/sim/*
   app/services/market_data.py yfinance provider, SQLite cache, future-timestamp projection
   app/services/forecaster.py  Kronos loading + independent sampled paths + quantile stats
   app/services/challengers.py naive / GARCH / Chronos-Bolt forecasters for comparison
   app/services/calibration.py conformal (CQR) calibration of forecast bands
   app/services/backtest.py    walk-forward evaluation with baselines
   app/services/crosssection.py universe ranking research: RankIC, bucket and long-short portfolios, factors
+  app/services/fundamentals.py point-in-time earnings surprise, analyst revisions, earnings yield, size
+  app/services/volatility.py  volatility forecast test: QLIKE, calibration, Diebold-Mariano vs EWMA
   app/services/portfolio.py   portfolio lab: signal blend, Ledoit-Wolf risk, construction, deflated Sharpe
   app/services/sim.py         market replay engine: order fills, accounts, bots, performance
   app/services/sim_session.py game sessions, Kronos bot + hints, leaderboard
@@ -114,6 +121,7 @@ frontend/
   src/App.tsx                 dashboard UI
   src/Sim.tsx                 market replay game UI
   src/Research.tsx            cross-sectional research UI
+  src/Volatility.tsx          volatility test UI
   src/Portfolio.tsx           portfolio lab UI
   src/charts.tsx              lightweight-charts candle/forecast/backtest charts
 ```
@@ -193,11 +201,101 @@ that is short-term reversal, which its per-window normalization builds in. Only 
 plain reversal factor does about as well for free. These are small samples (24–40 rebalances), so
 treat them as a starting point, not a verdict.
 
+## Non-price signals
+
+Kronos only sees the chart. The Research tab can rank four signals it can't see, each rebuilt
+**point-in-time** from data yfinance dates event by event, so a rebalance only uses what was public
+by then:
+
+| Signal | Definition | Source paper |
+|---|---|---|
+| earnings surprise | latest reported EPS vs consensus (%), if reported in the last 100 days | Bernard & Thomas 1989 (post-earnings drift) |
+| analyst revisions | upgrades and target raises minus downgrades and cuts, last 90 days, averaged | Womack 1996 |
+| earnings yield | last four reported quarters of EPS / price | Basu 1977 |
+| small size | minus log market cap (split-adjusted shares × price) | Banz 1981 |
+
+Earnings count from the bar they were public by (before-open reports the same day, after-close the
+next). Analyst actions and share counts carry dates without time zones, so they count from the next
+day. ETFs, crypto and indexes have no fundamentals; they, and any other gaps, sit at the median of
+each rebalance's ranking, and the table shows each signal's coverage. They work in the Portfolio lab
+blend and in Sim portfolio-bot recipes too (blind games keep the real prices for this).
+
+**No news.** yfinance only returns the last few days of headlines, so a news or sentiment signal
+can't be backtested without look-ahead. That needs a paid historical archive.
+
+First run, 20 mega caps, all four fundamentals next to Kronos-mini (lookback 64, 8 paths, 5 buckets):
+
+| Signal | 5d × 40 RankIC (t) | 20d × 60 RankIC (t) | ρ momentum (20d) |
+|---|---|---|---|
+| kronos-mini | +0.10 (2.8) | +0.08 (2.3) | −0.17 |
+| earnings surprise | −0.07 (−1.8) | −0.02 (−0.4) | +0.14 |
+| analyst revisions | −0.03 (−0.9) | +0.01 (0.2) | +0.52 |
+| earnings yield | +0.01 (0.1) | −0.00 (−0.0) | −0.15 |
+| small size | −0.02 (−0.4) | +0.01 (0.3) | −0.11 |
+
+None of the four shows anything in mega caps, at either horizon, over five years of monthly
+rebalances. That matches the literature more than it contradicts it: these anomalies are strongest
+in small, thinly covered stocks and have shrunk since publication (McLean & Pontiff 2016), and 20
+names is a small cross-section with little power. Analyst revisions are half momentum (ρ 0.52):
+analysts chase price. Try a wider, smaller-cap universe before drawing conclusions.
+
+## Volatility test
+
+The **Volatility** tab asks the question price history *can* answer: not which way, but how much.
+Volatility clusters (Engle 1982), so a model can be useless for direction and still useful for
+risk. Every `horizon` bars, each model's spread of sampled paths (variance of the horizon log
+return) is scored as a forecast of the next `horizon` bars' realized variance (sum of squared
+per-bar log returns, Andersen & Bollerslev 1998), next to a no-model **EWMA** baseline (λ = 0.94,
+RiskMetrics):
+
+- **QLIKE** loss (Patton 2011), raw and **calibrated**: each period's forecasts rescaled by the
+  average realized/forecast ratio of earlier periods only, so a constant scale error isn't punished.
+- **Skill vs EWMA** (1 − calibrated QLIKE ratio) and a **Diebold-Mariano** t-stat on the per-period
+  loss gap.
+- **Mincer-Zarnowitz** R² and slope of log realized on log forecast (scale-free).
+- **Ranking**: RankIC across symbols (which names will be wildest) and correlation over time within
+  each symbol (when one will get wilder).
+- **Vol ratio**: realized / raw forecast vol. Above 1 means the bands are too narrow.
+
+The forecasts come from the same sampled paths the Research tab ranks with and share its cache.
+
+First results, 20 mega caps, 5-day horizon, 120 rebalances (117 scored), 16 paths:
+
+| Forecast (lookback) | vol ratio | calibrated QLIKE | skill vs EWMA (DM t) | MZ R² | rank IC | timing |
+|---|---|---|---|---|---|---|
+| ewma baseline | 1.11× | 0.557 | — | 0.24 | 0.49 | 0.16 |
+| chronos-bolt (256) | 1.33× | 0.530 | **+4.9% (+2.2)** | 0.27 | 0.51 | 0.20 |
+| kronos-mini (256) | 1.90× | 0.618 | −10.8% (−2.9) | 0.20 | 0.42 | 0.15 |
+| kronos-mini (64) | 2.23× | 0.663 | −18.9% (−5.9) | 0.18 | 0.40 | 0.13 |
+| garch(1,1)-t (500) | 1.25× | 0.657 | −17.8% (−3.8) | 0.20 | 0.44 | 0.10 |
+| garch(1,1)-t (500), 50 paths | 1.17× | 0.600 | −7.6% (−1.8) | 0.23 | 0.50 | 0.11 |
+
+Same universe, last 40 rebalances only (37 scored), lookback 256, to see what more paths buy Kronos:
+
+| Forecast | vol ratio | calibrated QLIKE | skill vs EWMA (DM t) | rank IC |
+|---|---|---|---|---|
+| ewma baseline | 1.06× | 0.442 | — | 0.46 |
+| chronos-bolt | 1.27× | 0.405 | **+8.5% (+3.6)** | 0.47 |
+| kronos-mini, 16 paths | 1.84× | 0.478 | −8.2% (−1.8) | 0.36 |
+| kronos-mini, 50 paths | 1.75× | 0.441 | +0.2% (+0.1) | 0.41 |
+
+What it says:
+
+- **Kronos's raw spread is about half the real volatility** (vol ratio 1.9–2.2×, worse at longer
+  horizons: 3.2× at 20 days). That's the same too-narrow bands the conformal calibration fixes.
+- **Calibrated, Kronos at best ties a plain EWMA**: it ranks which stocks will be wildest
+  (rank IC 0.36–0.42) but loses to EWMA with 16 paths and a short lookback, and only draws level
+  with 50 paths and 256 bars (about 15 minutes of forecasts, vs instant for EWMA).
+- **Chronos-Bolt is the only model that beats EWMA**, with a 256-bar context.
+- **Sampling noise is a real handicap**: a variance from 16 paths has about ±37% error. GARCH's gap
+  to EWMA more than halves going from 16 to 50 paths. Chronos predicts quantiles directly, so it has
+  none. Use as many paths as you can afford when comparing sampled models.
+
 ## Portfolio lab
 
 The **Portfolio** tab turns Research-tab signals into a portfolio you could hold, walk-forward:
 
-1. **Blend.** Pick any of Kronos, the challengers, momentum and reversal, each with a weight
+1. **Blend.** Pick any of Kronos, the challengers, momentum, reversal and the fundamentals, each with a weight
    (negative flips a signal). Scores become z-scored cross-sectional ranks so different scales mix
    fairly. "By trailing IC" weights each signal by its positive RankIC over past rebalances only.
 2. **Risk model.** Covariance of per-bar returns over a trailing window, shrunk toward a scaled
@@ -379,7 +477,8 @@ Papers to read before building this (titles as collected; not yet checked):
 Possible next steps for Candlecast:
 
 1. **News/sentiment panel:** pull headlines for the ticker and score them with FinBERT, then show
-   them next to the projection without feeding them to the model yet.
+   them next to the projection without feeding them to the model yet. Backtesting it needs a
+   historical news archive; yfinance only has the last few days (see [Non-price signals](#non-price-signals)).
 2. **Sentiment as a signal:** check in the backtest whether sentiment agreeing with Kronos's P(up)
    gives a better hit rate than Kronos alone.
 3. **Chart-image model:** render the lookback window as a candlestick image and score it with a

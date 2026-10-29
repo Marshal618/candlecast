@@ -22,10 +22,13 @@ from app.schemas import (
     SimStep,
     StrategyRequest,
     TokensRequest,
+    VolatilityRequest,
 )
 from app.services import calibration
 from app.services.backtest import run_backtest
 from app.services.crosssection import FACTORS, ScoreCache, build_panel, run_crosssection
+from app.services.fundamentals import FUNDAMENTALS, CachedFundamentals, YFinanceFundamentals
+from app.services.volatility import run_volatility
 from app.services.portfolio import Construction, TrialLog, run_portfolio, study_key
 from app.services.journal import Journal, forecast_entry
 from app.services.sim_session import SimError, SimStore
@@ -44,7 +47,8 @@ forecaster = Forecaster(settings.device, settings.inference_batch_size)
 journal = Journal(settings.journal_path, market)
 scores = ScoreCache(settings.research_path)
 trials = TrialLog(settings.research_path)
-sims = SimStore(settings.sim_path, market, forecaster, recipes=trials.recipe)
+funds = CachedFundamentals(YFinanceFundamentals(), settings.cache_path)
+sims = SimStore(settings.sim_path, market, forecaster, recipes=trials.recipe, fundamentals=funds.get)
 
 
 @asynccontextmanager
@@ -231,11 +235,11 @@ async def tokens(req: TokensRequest):
     return {"symbol": req.symbol.upper(), "interval": req.interval, "model": req.model, "latency_ms": round(t.ms), **result}
 
 
-async def _universe(symbols: list[str], interval: str, models: list[str], lookback: int) -> dict:
+async def _universe(symbols: list[str], interval: str, models: list[str], lookback: int, min_symbols: int = 4) -> dict:
     """Closed bars for each distinct symbol, after checking every model can take the lookback."""
     symbols = list(dict.fromkeys(s.strip().upper() for s in symbols if s.strip()))
-    if len(symbols) < 4:
-        raise HTTPException(422, "Need at least 4 distinct symbols to rank.")
+    if len(symbols) < min_symbols:
+        raise HTTPException(422, f"Need at least {min_symbols} distinct symbols to rank.")
     for m in models:
         _check_lookback(m, lookback, lookback)
     now = time.time()
@@ -243,9 +247,19 @@ async def _universe(symbols: list[str], interval: str, models: list[str], lookba
     return {s: closed_bars(df, interval, now) for s, df in zip(symbols, loaded)}
 
 
+async def _fundamentals(symbols, names) -> dict:
+    """Point-in-time fundamentals per symbol, fetched only when some are asked for."""
+    if not names:
+        return {}
+    loaded = await asyncio.gather(*(run_in_threadpool(funds.get, s) for s in symbols))
+    return dict(zip(symbols, loaded))
+
+
 @app.post("/api/crosssection")
 async def crosssection(req: CrossSectionRequest):
     frames = await _universe(req.symbols, req.interval, req.models, req.lookback)
+    use = list(dict.fromkeys(req.fundamentals))
+    fund = await _fundamentals(list(frames), use)
     with Timer() as t:
         try:
             result = await run_in_threadpool(
@@ -263,6 +277,8 @@ async def crosssection(req: CrossSectionRequest):
                     top_p=req.top_p,
                     cost_bps=req.cost_bps,
                     cache=scores,
+                    fundamentals=fund,
+                    use_fundamentals=use,
                 )
             )
         except ValueError as e:
@@ -273,8 +289,10 @@ async def crosssection(req: CrossSectionRequest):
 @app.post("/api/portfolio")
 async def portfolio(req: PortfolioRequest):
     names = list(dict.fromkeys(s.name for s in req.signals))
-    models = [n for n in names if n not in FACTORS]
+    models = [n for n in names if n not in FACTORS and n not in FUNDAMENTALS]
+    use = [n for n in names if n in FUNDAMENTALS]
     frames = await _universe(req.symbols, req.interval, models, req.lookback)
+    fund = await _fundamentals(list(frames), use)
     c = req.construction
     with Timer() as t:
         try:
@@ -283,6 +301,7 @@ async def portfolio(req: PortfolioRequest):
                     forecaster, frames, interval=req.interval, models=models, lookback=req.lookback,
                     horizon=req.horizon, periods=req.periods, samples=req.samples, temperature=req.temperature,
                     top_p=req.top_p, min_history=c.risk_window + 1, cache=scores,
+                    fundamentals=fund, use_fundamentals=use,
                 )
             )
             result = run_portfolio(
@@ -310,6 +329,24 @@ async def portfolio(req: PortfolioRequest):
         "study": [{"id": r["id"], "name": r["name"], "config": r["config"], "metrics": r["metrics"]} for r in leaders[:10]],
         **result,
     }
+
+
+@app.post("/api/volatility")
+async def volatility(req: VolatilityRequest):
+    models = list(dict.fromkeys(req.models))
+    frames = await _universe(req.symbols, req.interval, models, req.lookback, min_symbols=1)
+    with Timer() as t:
+        try:
+            result = await run_in_threadpool(
+                lambda: run_volatility(
+                    forecaster, frames, interval=req.interval, models=models, lookback=req.lookback,
+                    horizon=req.horizon, periods=req.periods, samples=req.samples,
+                    temperature=req.temperature, top_p=req.top_p, cache=scores,
+                )
+            )
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+    return {"interval": req.interval, "horizon": req.horizon, "latency_ms": round(t.ms), **result}
 
 
 @app.get("/api/portfolio/recipes")

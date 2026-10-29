@@ -222,6 +222,8 @@ export interface JournalReport {
 }
 
 export type Factor = 'momentum' | 'reversal'
+// Non-price signals rebuilt point-in-time (backend services/fundamentals.py)
+export type Fundamental = 'surprise' | 'revisions' | 'value' | 'size'
 
 export interface CrossSectionRequest {
   symbols: string[]
@@ -233,6 +235,7 @@ export interface CrossSectionRequest {
   buckets: number
   samples: number
   cost_bps: number
+  fundamentals?: Fundamental[]
 }
 
 export interface IcStats {
@@ -244,8 +247,10 @@ export interface IcStats {
 }
 
 export interface CrossSectionSignal {
-  name: ModelName | Factor
-  kind: 'model' | 'factor'
+  name: SignalName
+  kind: 'model' | 'factor' | 'fundamental'
+  // fundamentals only: share of (rebalance, symbol) cells with real data; the rest sit mid-ranking
+  coverage?: number
   ic: IcStats
   rank_ic: IcStats
   rank_ic_residual?: IcStats
@@ -278,7 +283,48 @@ export interface CrossSectionResponse {
   signals: CrossSectionSignal[]
 }
 
-export type SignalName = ModelName | Factor
+export type SignalName = ModelName | Factor | Fundamental
+
+export interface VolatilityRequest {
+  symbols: string[]
+  interval: '1d' | '1h'
+  models: ModelName[]
+  lookback: number
+  horizon: number
+  periods: number
+  samples: number
+}
+
+export interface VolForecast {
+  name: ModelName | 'ewma'
+  kind: 'model' | 'baseline'
+  qlike: number
+  qlike_cal: number
+  skill: number
+  dm_t: number
+  mz_slope: number
+  mz_r2: number
+  rank_ic: IcStats
+  timing_corr: number
+  vol_ratio: number
+  // (periods, symbols) annualized vol; calibrated is null during the warm-up periods
+  raw: number[][]
+  calibrated: (number | null)[][]
+}
+
+export interface VolatilityResponse {
+  interval: '1d' | '1h'
+  horizon: number
+  latency_ms: number
+  symbols: string[]
+  periods: number
+  scored_periods: number
+  calibration_periods: number
+  origin_times: number[]
+  realized: number[][]
+  avg_realized_vol: number
+  forecasts: VolForecast[]
+}
 
 export interface Construction {
   method: 'equal' | 'inverse_vol' | 'mean_variance'
@@ -493,6 +539,8 @@ export const api = {
     save: (trial_id: number, name: string) =>
       request<Trial>('/api/portfolio/recipes', { method: 'POST', body: JSON.stringify({ trial_id, name }) }),
   },
+  volatility: (body: VolatilityRequest) =>
+    request<VolatilityResponse>('/api/volatility', { method: 'POST', body: JSON.stringify(body) }),
   crosssection: (body: CrossSectionRequest) =>
     request<CrossSectionResponse>('/api/crosssection', { method: 'POST', body: JSON.stringify(body) }),
   tokens: (body: Record<string, unknown>) =>

@@ -15,7 +15,8 @@ import { pct, rate } from './format'
 import { Slider, Stat } from './ui'
 import { UNIVERSES } from './universes'
 
-const OTHER_SIGNALS: SignalName[] = ['reversal', 'momentum', 'naive', 'garch', 'chronos']
+// Fundamentals are rebuilt point-in-time; ETFs and crypto have none and sit mid-ranking on them
+const OTHER_SIGNALS: SignalName[] = ['reversal', 'momentum', 'surprise', 'revisions', 'value', 'size', 'naive', 'garch', 'chronos']
 const METHODS: { id: Construction['method']; label: string }[] = [
   { id: 'equal', label: 'equal' },
   { id: 'inverse_vol', label: 'inverse vol' },

@@ -420,10 +420,41 @@ export function LongShortChart({ result, selected }: { result: CrossSectionRespo
         values: s.equity,
         color: signalColor(s.name),
         width: (s.name === selected ? 2 : 1) as 1 | 2,
-        style: s.kind === 'factor' ? LineStyle.Dashed : LineStyle.Solid,
+        style: s.kind === 'factor' ? LineStyle.Dashed : s.kind === 'fundamental' ? LineStyle.SparseDotted : LineStyle.Solid,
       })),
     ],
     [result, selected],
   )
   return <CurvesChart interval={result.interval} times={result.origin_times} curves={curves} />
+}
+
+export interface VolLine {
+  values: (number | null)[] // annualized vol per rebalance; null = no value (calibration warm-up)
+  color: string
+  width?: 1 | 2
+  style?: LineStyle
+}
+
+// Forecast vs realized volatility at each rebalance, as annualized percentages
+export function VolChart({ interval, times, lines }: { interval: Interval | '1h'; times: number[]; lines: VolLine[] }) {
+  const { ref, chart } = useChart(interval)
+
+  useEffect(() => {
+    if (!chart || times.length < 2) return
+    const fmt = { type: 'custom' as const, formatter: (v: number) => `${(v * 100).toFixed(0)}%` }
+    const series = lines.map((l) => {
+      const s = chart.addLineSeries({
+        color: l.color, lineWidth: l.width ?? 1, lineStyle: l.style ?? LineStyle.Solid,
+        priceFormat: fmt, priceLineVisible: false, lastValueVisible: false,
+      })
+      s.setData(l.values.map((value, i) => (value == null ? { time: ts(times[i]) } : { time: ts(times[i]), value })))
+      return s
+    })
+    chart.timeScale().fitContent()
+    return () => {
+      removeAll(chart, series)
+    }
+  }, [times, lines, chart])
+
+  return <div ref={ref} className="chart chart-short" />
 }

@@ -1,4 +1,4 @@
-import type { Factor, ModelName, SignalName, SimPlayer } from './api'
+import type { Factor, Fundamental, ModelName, SignalName, SimPlayer } from './api'
 
 export const COLORS = {
   bg: '#101418',
@@ -54,5 +54,29 @@ export const FACTOR_LABELS: Record<Factor, string> = {
   reversal: 'short-term reversal',
 }
 
-export const signalLabel = (s: SignalName) => (s in FACTOR_LABELS ? FACTOR_LABELS[s as Factor] : MODEL_LABELS[s as ModelName])
-export const signalColor = (s: SignalName) => (s in FACTOR_COLORS ? FACTOR_COLORS[s as Factor] : MODEL_COLORS[s as ModelName])
+// Non-price signals: muted earth tones, distinct from the model and price-factor hues
+export const FUNDAMENTAL_COLORS: Record<Fundamental, string> = {
+  surprise: '#d68f6a',
+  revisions: '#a3c47a',
+  value: '#c9a2a2',
+  size: '#8ab0b8',
+}
+
+export const FUNDAMENTAL_LABELS: Record<Fundamental, string> = {
+  surprise: 'earnings surprise',
+  revisions: 'analyst revisions',
+  value: 'earnings yield',
+  size: 'small size',
+}
+
+export const FUNDAMENTAL_HINTS: Record<Fundamental, string> = {
+  surprise: 'latest EPS vs consensus, if reported in the last 100 days (post-earnings drift)',
+  revisions: 'upgrades + target raises minus downgrades + cuts, last 90 days',
+  value: 'last 4 quarters of reported EPS / price',
+  size: 'minus log market cap: smaller names score higher',
+}
+
+export const signalLabel = (s: SignalName) =>
+  s in FACTOR_LABELS ? FACTOR_LABELS[s as Factor] : s in FUNDAMENTAL_LABELS ? FUNDAMENTAL_LABELS[s as Fundamental] : MODEL_LABELS[s as ModelName]
+export const signalColor = (s: SignalName) =>
+  s in FACTOR_COLORS ? FACTOR_COLORS[s as Factor] : s in FUNDAMENTAL_COLORS ? FUNDAMENTAL_COLORS[s as Fundamental] : MODEL_COLORS[s as ModelName]

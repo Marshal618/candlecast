@@ -6,6 +6,8 @@ once and memoized, so replays never call the model again.
 
 The portfolio bot runs a saved Portfolio-lab recipe frozen into the game's config: its final blend
 weights, construction and model settings. The Sim is a cash account, so it always runs long-only.
+Fundamentals in a recipe are rebuilt point-in-time at each decision bar from real timestamps and
+real prices (blind games keep each symbol's rebasing factor for this).
 """
 
 import json
@@ -21,6 +23,7 @@ import pandas as pd
 
 from app.services import portfolio, sim
 from app.services.crosssection import FACTORS, factor_scores, model_scores
+from app.services.fundamentals import FUNDAMENTALS, Fundamentals, fill_missing, fundamental_scores
 from app.services.forecaster import FEATURES, summarize
 from app.services.market_data import CachedMarketData, closed_bars, future_timestamps, interval_delta
 
@@ -55,9 +58,10 @@ class SimError(Exception):
 class SimStore:
     def __init__(
         self, path: Path, market: CachedMarketData, forecaster, now: Callable[[], float] = time.time,
-        recipes: Callable[[int], dict] | None = None,
+        recipes: Callable[[int], dict] | None = None, fundamentals: Callable[[str], Fundamentals] | None = None,
     ):
         self.path, self.market, self.forecaster, self.now, self.recipes = path, market, forecaster, now, recipes
+        self.fundamentals = fundamentals
         self._lock = threading.Lock()
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
@@ -112,7 +116,10 @@ class SimStore:
                 lo, hi = (pd.Timestamp(full.times[i], unit="s").date() for i in (WARMUP, last_start))
                 raise SimError(f"Start must be between {lo} and {hi} for this basket and length.")
         m = sim.slice_market(full, s - WARMUP, s + length + 1)
+        # Stored price = real price * scale (1 unless blind); fundamentals need the real one
+        scale = np.ones(len(m.symbols))
         if cfg["blind"]:
+            scale = 100.0 / m.closes_ffill[WARMUP]
             m = sim.rescale_market(m, WARMUP)
         bots = ["buy_hold"] + [b for b in cfg["bots"] if b != "buy_hold"]
         recipe = self._recipe(cfg) if "portfolio" in bots else None
@@ -126,6 +133,7 @@ class SimStore:
             "end_index": WARMUP + length,
             "real_start": int(m.times[WARMUP]),
             "real_end": int(m.times[WARMUP + length]),
+            "price_scale": [float(x) for x in scale],
         }
         sid = secrets.token_hex(4)
         with self._lock, self._connect() as conn:
@@ -397,12 +405,18 @@ class SimStore:
         m, n = s["market"], len(cfg["symbols"])
         c = portfolio.Construction(**r["construction"])
         bpy = _bars_per_year(m.times)
+        funds = [k for k in r["blend"] if k in FUNDAMENTALS]
+        events = [self.fundamentals(sym) if self.fundamentals else Fundamentals.empty() for sym in cfg["symbols"]] if funds else []
+        scale = np.array(cfg.get("price_scale") or np.ones(n))
         out = dict(done)
         prev = np.array(out[max(out, key=int)]) if out else np.zeros(n)
         for t in sorted(todo):
             hist = [m.c[: t + 1, i][~np.isnan(m.c[: t + 1, i])] for i in range(n)]
             scores = factor_scores(hist, r["horizon"])
-            models = [k for k in r["blend"] if k not in FACTORS]
+            if funds:
+                fs = fundamental_scores(events, int(m.times[t]), cfg["interval"], m.closes_ffill[t] / scale)
+                scores.update({k: fill_missing(fs[k]) for k in funds})
+            models = [k for k in r["blend"] if k not in FACTORS and k not in FUNDAMENTALS]
             ctxs = {i: self._context(s, i, t, r["lookback"]) for i in range(n)}
             ctxs = {i: x for i, x in ctxs.items() if x is not None}  # a symbol too new to forecast scores 0
             if models and ctxs:

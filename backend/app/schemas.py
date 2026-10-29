@@ -66,6 +66,10 @@ class TokensRequest(BaseModel):
     segments: int = Field(16, ge=2, le=64)
 
 
+# Non-price signals rebuilt point-in-time (see services/fundamentals.py)
+Fundamental = Literal["surprise", "revisions", "value", "size"]
+
+
 class CrossSectionRequest(BaseModel):
     """Rank a universe each rebalance date by every model's forecast (see services/crosssection.py)."""
 
@@ -81,13 +85,29 @@ class CrossSectionRequest(BaseModel):
     temperature: float = Field(1.0, gt=0, le=2.0)
     top_p: float = Field(0.9, gt=0, le=1.0)
     cost_bps: float = Field(5.0, ge=0, le=100)
+    fundamentals: list[Fundamental] = Field([], max_length=4)
+
+
+class VolatilityRequest(BaseModel):
+    """Score each model's sampled spread as a volatility forecast (see services/volatility.py)."""
+
+    symbols: list[str] = Field(..., min_length=1, max_length=30)
+    interval: Literal["1d", "1h"] = "1d"
+    models: list[ModelName] = Field(["mini", "garch"], min_length=1, max_length=6)
+    lookback: int = Field(64, ge=32, le=2048)
+    horizon: int = Field(5, ge=1, le=60)
+    periods: int = Field(24, ge=6, le=120)
+    # A variance needs several samples; 8 gives roughly +-25% noise per forecast
+    samples: int = Field(8, ge=4, le=50)
+    temperature: float = Field(1.0, gt=0, le=2.0)
+    top_p: float = Field(0.9, gt=0, le=1.0)
 
 
 Factor = Literal["momentum", "reversal"]
 
 
 class BlendSignal(BaseModel):
-    name: ModelName | Factor
+    name: ModelName | Factor | Fundamental
     # Negative flips a signal (rank its lowest scores highest)
     weight: float = Field(1.0, ge=-5, le=5)
 
