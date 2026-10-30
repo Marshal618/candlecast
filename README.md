@@ -101,13 +101,14 @@ docker compose up --build     # single container on :8000 serving API and built 
 
 ```
 backend/
-  app/main.py                 FastAPI routes: /api/health, /api/candles, /api/forecast, /api/backtest, /api/strategy, /api/tokens, /api/journal, /api/crosssection, /api/volatility, /api/portfolio, /api/sim/*
+  app/main.py                 FastAPI routes: /api/health, /api/candles, /api/forecast, /api/backtest, /api/strategy, /api/tokens, /api/journal, /api/crosssection, /api/volatility, /api/universes, /api/progress, /api/portfolio, /api/sim/*
   app/services/market_data.py yfinance provider, SQLite cache, future-timestamp projection
   app/services/forecaster.py  Kronos loading + independent sampled paths + quantile stats
   app/services/challengers.py naive / GARCH / Chronos-Bolt forecasters for comparison
   app/services/calibration.py conformal (CQR) calibration of forecast bands
   app/services/backtest.py    walk-forward evaluation with baselines
   app/services/crosssection.py universe ranking research: RankIC, bucket and long-short portfolios, factors
+  app/universes.json          S&P 500 / 400 / 600 constituents (refresh: scripts/update_universes.py)
   app/services/fundamentals.py point-in-time earnings surprise, analyst revisions, earnings yield, size
   app/services/volatility.py  volatility forecast test: QLIKE, calibration, Diebold-Mariano vs EWMA
   app/services/portfolio.py   portfolio lab: signal blend, Ledoit-Wolf risk, construction, deflated Sharpe
@@ -237,7 +238,58 @@ None of the four shows anything in mega caps, at either horizon, over five years
 rebalances. That matches the literature more than it contradicts it: these anomalies are strongest
 in small, thinly covered stocks and have shrunk since publication (McLean & Pontiff 2016), and 20
 names is a small cross-section with little power. Analyst revisions are half momentum (ρ 0.52):
-analysts chase price. Try a wider, smaller-cap universe before drawing conclusions.
+analysts chase price. Wider index universes are below.
+
+## Large universes
+
+Twenty names can't show a cross-sectional effect of the size these anomalies have. The universe
+picker in Research, Volatility and Portfolio also lists the **S&P 500, S&P 400 and S&P 600**
+(today's constituents from Wikipedia, shipped in `app/universes.json`; refresh with
+`python scripts/update_universes.py`). Up to 700 symbols per run:
+
+- Prices load 16 at a time, fundamentals 8. Symbols that fail to load are listed as
+  **unavailable**, and the run goes ahead without them.
+- Symbols listed too recently to cover every rebalance are **dropped**, rather than shortening the
+  whole study to the youngest name's history.
+- Model forecasts run and cache in chunks of 512 contexts, so an interrupted run picks up where it
+  stopped. The run button shows a worst-case time, and `/api/progress` drives a live counter.
+  Kronos-mini samples about 900 bars per second on an M3 (≈170 paths/s at a 5-day horizon, ≈47 at
+  20 days).
+
+**Survivorship bias.** These lists are *today's* members, so every past rebalance only ranks companies
+that later survived or were promoted into the index. Names that collapsed and were removed are
+missing. That biases anything that leans toward small or distressed stocks upward. The app flags
+it for any universe over 30 names. Point-in-time membership needs a paid source (CRSP, Compustat,
+Norgate).
+
+Monthly rebalances (20-day horizon, 60 periods, 2022-01 to 2026-09, 5 buckets):
+
+| Signal | S&P 500 RankIC (t) | residual t | L/S Sharpe | S&P 600 RankIC (t) | residual t | L/S Sharpe |
+|---|---|---|---|---|---|---|
+| kronos-mini (64, 8 paths) | +0.021 (1.14) | 1.57 | 0.41 | not run | | |
+| earnings surprise | +0.020 (1.82) | **2.16** | 0.74 | +0.011 (1.53) | 1.29 | 0.36 |
+| analyst revisions | +0.003 (0.18) | 1.02 | 0.04 | +0.001 (0.08) | −0.23 | −0.03 |
+| earnings yield | +0.016 (0.88) | 0.72 | −0.02 | +0.017 (1.10) | 1.02 | 0.13 |
+| small size | +0.009 (0.67) | 0.10 | 0.92 | **+0.073 (6.43)** | **6.63** | **3.43** |
+| momentum (60-5 bars) | −0.016 (−0.72) | | −0.21 | +0.004 (0.23) | | 0.02 |
+| reversal | −0.004 (−0.18) | | −0.18 | +0.007 (0.49) | | 0.12 |
+
+The S&P 500 run covered 491 symbols (12 dropped). The S&P 600 run covered 568 symbols (34 dropped,
+one unavailable). Factors and fundamentals alone take about 5 minutes. Kronos-mini on the S&P 500
+took 84 minutes (29,460 forecasts × 8 paths).
+
+What it says:
+
+- **Earnings surprise is the one plausible signal in large caps.** After removing momentum and
+  reversal its t is 2.16, and it is weaker but the same sign in small caps. That fits post-earnings
+  drift. It is borderline, so treat it as worth watching rather than as a result.
+- **Kronos-mini doesn't hold up at scale.** Its +0.08 RankIC on 20 mega caps becomes +0.02 (t 1.1)
+  across the S&P 500, and it is mostly short-term reversal (ρ +0.45).
+- **Small size in the S&P 600 is the big number, and the least trustworthy.** It is steady across
+  the sample (RankIC +0.086, +0.064, +0.067 by thirds), which is what survivorship would produce: the
+  smallest of today's members are exactly the ones that grew into the index or narrowly survived.
+  Expect most of it to vanish with point-in-time membership.
+- Revisions are still mostly momentum (ρ 0.52 in the S&P 500).
 
 ## Volatility test
 

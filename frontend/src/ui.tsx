@@ -32,3 +32,15 @@ export function Slider({
     </label>
   )
 }
+
+// Which requested symbols a run left out, and why
+export function RunNote({ dropped, unavailable }: { dropped?: string[]; unavailable?: string[] }) {
+  if (!dropped?.length && !unavailable?.length) return null
+  const list = (xs: string[]) => (xs.length > 12 ? `${xs.slice(0, 12).join(', ')} +${xs.length - 12} more` : xs.join(', '))
+  return (
+    <p className="muted small">
+      {!!dropped?.length && <>left out for too little history (recent listings): {list(dropped)}. </>}
+      {!!unavailable?.length && <>no data from yahoo (renamed or delisted?): {list(unavailable)}.</>}
+    </p>
+  )
+}

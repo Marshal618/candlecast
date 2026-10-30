@@ -178,3 +178,12 @@ def test_volatility_scores_models_against_ewma(client):
     assert d["scored_periods"] == 5 and len(d["realized"]) == 8 and len(d["realized"][0]) == 2
     for f in d["forecasts"]:
         assert f["qlike_cal"] >= 0 and 0 <= f["mz_r2"] <= 1 and f["vol_ratio"] > 0
+
+
+def test_index_universes_and_unknown_symbols_are_skipped(client):
+    u = client.get("/api/universes").json()
+    assert len(u["universes"]["S&P 500"]) > 450 and u["as_of"]
+    r = client.post("/api/crosssection", json={"symbols": ["XLE", "XLF", "XLK", "XLU", "ZZZZNOTREAL"], "models": ["naive"],
+                                              "periods": 4, "samples": 2})
+    assert r.status_code == 200, r.text
+    assert r.json()["unavailable"] == ["ZZZZNOTREAL"]

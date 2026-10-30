@@ -24,7 +24,8 @@ Walk-forward, at each rebalance date (every `horizon` bars, non-overlapping):
    the model's (or fundamental's) skill beyond momentum and reversal.
 
 Symbols are aligned by calendar date (daily) or UTC hour (hourly), and rebalances use dates every
-symbol traded. Models forecast `horizon` of each symbol's own bars, so for crypto in a stock
+symbol traded. In large universes, symbols without enough history for every requested rebalance
+(recent listings) are dropped and reported rather than shortening the study for everyone. Models forecast `horizon` of each symbol's own bars, so for crypto in a stock
 universe the forecast covers slightly fewer calendar days than the return it is scored against.
 """
 
@@ -46,6 +47,34 @@ from app.services.strategy import _max_drawdown, _sharpe, bars_per_year
 MOMENTUM_BARS = 60
 MOMENTUM_SKIP = 5
 FACTORS = ("momentum", "reversal")
+CHUNK = 512  # contexts per model call; each chunk is cached as soon as it's done, so long runs resume
+
+
+class Progress:
+    """Forecasts done / needed for the run in flight (one local user, so one run at a time is enough)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.state = {"label": None, "done": 0, "total": 0}
+
+    def start(self, label: str, total: int) -> None:
+        with self._lock:
+            self.state = {"label": label, "done": 0, "total": total}
+
+    def advance(self, n: int) -> None:
+        with self._lock:
+            self.state = {**self.state, "done": self.state["done"] + n}
+
+    def finish(self) -> None:
+        with self._lock:
+            self.state = {"label": None, "done": 0, "total": 0}
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return dict(self.state)
+
+
+progress = Progress()
 
 
 def _rowwise_corr(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -222,11 +251,18 @@ def cached_stat(
     hit = cache.get(want) if cache else {}
     todo = [k for k, kk in enumerate(want) if kk not in hit]
     if todo:
-        fresh = model_stats(forecaster, [contexts[k] for k in todo], interval, model, horizon, samples, temperature, top_p)
-        new = {key(contexts[k], owners[k], st): float(v) for st, vals in fresh.items() for k, v in zip(todo, vals)}
-        if cache:
-            cache.put(new)
-        hit = {**hit, **{k: new[k] for k in (want[j] for j in todo)}}
+        progress.start(model, len(todo))
+        try:
+            for a in range(0, len(todo), CHUNK):
+                part = todo[a : a + CHUNK]
+                fresh = model_stats(forecaster, [contexts[k] for k in part], interval, model, horizon, samples, temperature, top_p)
+                new = {key(contexts[k], owners[k], st): float(v) for st, vals in fresh.items() for k, v in zip(part, vals)}
+                if cache:
+                    cache.put(new)
+                hit.update({want[j]: new[want[j]] for j in part})
+                progress.advance(len(part))
+        finally:
+            progress.finish()
     return np.array([hit[k] for k in want])
 
 
@@ -238,6 +274,7 @@ class Schedule:
     common: list[pd.Timestamp]  # shared-clock bar keys (see sim.align_keys)
     pos: dict[str, np.ndarray]  # per symbol: row in its own frame of each common bar
     origins: list[int]  # rebalance rows in `common`, oldest first
+    dropped: list[str]  # symbols left out for too little history
 
     def contexts(self, frames: dict[str, pd.DataFrame], lookback: int) -> list[pd.DataFrame]:
         """The `lookback` bars up to each origin, origin-major then symbol."""
@@ -250,10 +287,16 @@ class Schedule:
 def schedule(
     frames: dict[str, pd.DataFrame], *, interval: str, lookback: int, horizon: int, periods: int, min_history: int = 0
 ) -> Schedule:
+    need = max(lookback, MOMENTUM_BARS + MOMENTUM_SKIP + 1, horizon + 1, min_history)
+    # A recent listing would shrink the shared calendar for everyone; leave it out instead, as long
+    # as enough symbols remain to rank
+    full = need + horizon * periods
+    keep = [s for s, f in frames.items() if len(f) >= full]
+    dropped = [s for s in frames if s not in keep] if len(keep) >= 4 else []
+    frames = {s: frames[s] for s in frames if s not in dropped}
     symbols = list(frames)
     keys = {s: align_keys(f.index, interval) for s, f in frames.items()}
     common = sorted(set.intersection(*(set(k) for k in keys.values())))
-    need = max(lookback, MOMENTUM_BARS + MOMENTUM_SKIP + 1, horizon + 1, min_history)
 
     # Position of each common date's bar in each symbol's own frame (last bar with that key)
     pos = {s: np.searchsorted(keys[s], common, side="right") - 1 for s in symbols}
@@ -267,7 +310,7 @@ def schedule(
             f"Only {len(origins)} rebalance dates have {need} bars of history for every symbol; need at least 4. "
             "Drop the newest listings, shorten the lookback, or use fewer rebalances."
         )
-    return Schedule(symbols, common, pos, origins)
+    return Schedule(symbols, common, pos, origins, dropped)
 
 
 @dataclass
@@ -284,6 +327,7 @@ class Panel:
     origins: list[int]  # row of each rebalance in `closes`
     bars_per_year: float
     coverage: dict[str, float] | None = None  # share of cells each fundamental had real data for
+    dropped: list[str] = ()  # symbols left out for too little history
 
     @property
     def periods_per_year(self) -> float:
@@ -309,6 +353,7 @@ def build_panel(
 ) -> Panel:
     sc = schedule(frames, interval=interval, lookback=lookback, horizon=horizon, periods=periods, min_history=min_history)
     symbols, origins, pos = sc.symbols, sc.origins, sc.pos
+    frames = {s: frames[s] for s in symbols}
     own = {s: frames[s]["close"].to_numpy(dtype=float) for s in symbols}
     closes = sc.closes(frames)
     fwd = closes[np.array(origins) + horizon] / closes[origins] - 1
@@ -336,6 +381,7 @@ def build_panel(
         symbols=symbols, interval=interval, horizon=horizon,
         origin_times=[int(sc.common[o].timestamp()) for o in origins], fwd=fwd, signals=signals,
         closes=closes, origins=origins, bars_per_year=bars_per_year(pd.DatetimeIndex(sc.common)), coverage=coverage,
+        dropped=list(sc.dropped),
     )
 
 
@@ -384,6 +430,7 @@ def run_crosssection(
     out.sort(key=lambda r: order.index(r["name"]))
     return {
         "symbols": p.symbols,
+        "dropped": list(p.dropped),
         "periods": len(p.origins),
         "origin_times": p.origin_times,
         "periods_per_year": p.periods_per_year,

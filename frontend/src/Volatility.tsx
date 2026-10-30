@@ -4,8 +4,8 @@ import { api, type Challenger, type KronosName, type ModelName, type VolForecast
 import { VolChart, type VolLine } from './charts'
 import { COLORS, MODEL_COLORS, MODEL_LABELS } from './theme'
 import { pct } from './format'
-import { Slider, Stat } from './ui'
-import { UNIVERSES } from './universes'
+import { RunNote, Slider, Stat } from './ui'
+import { estimate, runningLabel, UNIVERSES, useProgress, useUniverses } from './universes'
 
 const CHALLENGERS: Challenger[] = ['naive', 'garch', 'chronos']
 const EWMA_COLOR = COLORS.benchmark
@@ -29,6 +29,8 @@ export function VolatilityView({ onError }: { onError: (msg: string | null) => v
   const [result, setResult] = useState<VolatilityResponse | null>(null)
   const [symbol, setSymbol] = useState(0)
   const [calibrated, setCalibrated] = useState(true)
+  const { presets, asOf } = useUniverses()
+  const prog = useProgress(busy)
 
   const list = [...new Set(symbols.split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean))]
   const models: ModelName[] = [...(kronos ? [kronos] : []), ...rivals]
@@ -71,15 +73,20 @@ export function VolatilityView({ onError }: { onError: (msg: string | null) => v
         </p>
         <div className="setup-grid">
           <label>
-            symbols ({list.length}, 1–30)
+            symbols ({list.length}, 1–700)
             <input className="field" value={symbols} onChange={(e) => setSymbols(e.target.value)} spellCheck={false} />
             <div className="quick">
-              {Object.entries(UNIVERSES).map(([name, u]) => (
+              {Object.entries(presets).map(([name, u]) => (
                 <button key={name} onClick={() => setSymbols(u.join(', '))}>
                   {name}
                 </button>
               ))}
             </div>
+            {list.length > 30 && asOf && (
+              <span className="muted small">
+                index lists are today's members (as of {asOf}): names that fell out or were delisted are missing, which flatters backtests
+              </span>
+            )}
           </label>
           <label>
             bars
@@ -118,8 +125,11 @@ export function VolatilityView({ onError }: { onError: (msg: string | null) => v
           <Slider label="paths per forecast" value={samples} min={4} max={50} onChange={setSamples} />
         </div>
         <button className="primary start" disabled={busy || list.length < 1 || models.length === 0} onClick={run}>
-          {busy ? `▶ running ${periods * list.length * models.length} forecasts…` : '▶ Run volatility test'}
+          {busy ? runningLabel(prog, 'running') : '▶ Run volatility test'}
         </button>
+        {!busy && estimate(periods * list.length, samples, horizon, kronos != null) && (
+          <span className="muted small"> {estimate(periods * list.length, samples, horizon, kronos != null)}</span>
+        )}
       </div>
 
       {result && (
@@ -130,6 +140,7 @@ export function VolatilityView({ onError }: { onError: (msg: string | null) => v
             <Stat label="avg realized vol" value={pct(result.avg_realized_vol, 0).slice(1)} hint="annualized" />
             <Stat label="runtime" value={`${(result.latency_ms / 1000).toFixed(0)}s`} />
           </div>
+          <RunNote dropped={result.dropped} unavailable={result.unavailable} />
 
           <div className="panel-title">Forecasts</div>
           <table className="tok-table league research">

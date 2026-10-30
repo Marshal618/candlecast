@@ -127,3 +127,33 @@ def test_residual_strips_out_a_factor_the_model_copies():
     sig = _run(frames, ReversalCopycat(frames))["signals"][0]
     assert sig["corr"]["reversal"] == pytest.approx(1.0)
     assert sig["rank_ic_residual"]["mean"] == 0.0
+
+
+def test_recent_listing_is_dropped_instead_of_shrinking_the_study():
+    frames = _universe(n_symbols=5)
+    frames["NEW"] = frames["S0"].iloc[-90:].copy()  # listed 90 bars ago
+    res = _run(frames, PeekingForecaster(frames), periods=40)
+    assert res["dropped"] == ["NEW"] and "NEW" not in res["symbols"]
+    assert res["periods"] == 40
+
+
+def test_interrupted_run_resumes_from_cached_chunks(tmp_path, monkeypatch):
+    from app.services import crosssection
+    from app.services.crosssection import ScoreCache
+
+    monkeypatch.setattr(crosssection, "CHUNK", 10)
+    frames = _universe(n_symbols=6)
+    cache = ScoreCache(tmp_path / "r.sqlite3")
+
+    class Crashes(PeekingForecaster):
+        def sample_paths(self, contexts, *a):
+            if len(self.contexts) >= 30:
+                raise RuntimeError("killed")
+            return super().sample_paths(contexts, *a)
+
+    with pytest.raises(RuntimeError):
+        _run(frames, Crashes(frames), cache=cache)
+    assert crosssection.progress.snapshot()["total"] == 0  # cleared even on failure
+    fc = PeekingForecaster(frames)
+    _run(frames, fc, cache=cache)
+    assert len(fc.contexts) == 12 * 6 - 30  # only the chunks that never finished

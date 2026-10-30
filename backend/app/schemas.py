@@ -66,6 +66,9 @@ class TokensRequest(BaseModel):
     segments: int = Field(16, ge=2, le=64)
 
 
+# Index-sized universes (S&P 600 has ~603 names); Kronos forecasts on that many take a while
+MAX_UNIVERSE = 700
+
 # Non-price signals rebuilt point-in-time (see services/fundamentals.py)
 Fundamental = Literal["surprise", "revisions", "value", "size"]
 
@@ -73,7 +76,7 @@ Fundamental = Literal["surprise", "revisions", "value", "size"]
 class CrossSectionRequest(BaseModel):
     """Rank a universe each rebalance date by every model's forecast (see services/crosssection.py)."""
 
-    symbols: list[str] = Field(..., min_length=4, max_length=30)
+    symbols: list[str] = Field(..., min_length=4, max_length=MAX_UNIVERSE)
     interval: Literal["1d", "1h"] = "1d"
     models: list[ModelName] = Field(["mini", "naive"], min_length=1, max_length=6)
     lookback: int = Field(64, ge=32, le=2048)
@@ -91,7 +94,7 @@ class CrossSectionRequest(BaseModel):
 class VolatilityRequest(BaseModel):
     """Score each model's sampled spread as a volatility forecast (see services/volatility.py)."""
 
-    symbols: list[str] = Field(..., min_length=1, max_length=30)
+    symbols: list[str] = Field(..., min_length=1, max_length=MAX_UNIVERSE)
     interval: Literal["1d", "1h"] = "1d"
     models: list[ModelName] = Field(["mini", "garch"], min_length=1, max_length=6)
     lookback: int = Field(64, ge=32, le=2048)
@@ -125,7 +128,7 @@ class ConstructionParams(BaseModel):
 class PortfolioRequest(BaseModel):
     """Blend signals, build a risk-aware portfolio each rebalance (see services/portfolio.py)."""
 
-    symbols: list[str] = Field(..., min_length=4, max_length=30)
+    symbols: list[str] = Field(..., min_length=4, max_length=MAX_UNIVERSE)
     interval: Literal["1d", "1h"] = "1d"
     signals: list[BlendSignal] = Field([BlendSignal(name="reversal")], min_length=1, max_length=6)
     weighting: Literal["manual", "ic"] = "manual"

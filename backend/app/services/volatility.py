@@ -128,6 +128,7 @@ def run_volatility(
     if len(sc.origins) <= CAL_WARMUP + 1:
         raise ValueError(f"Need more than {CAL_WARMUP + 1} rebalances: the first {CAL_WARMUP} only calibrate.")
     symbols, origins = sc.symbols, sc.origins
+    frames = {s: frames[s] for s in symbols}
     closes = sc.closes(frames)
     rv = realized_variance(closes, origins, horizon)
     bpy = bars_per_year(pd.DatetimeIndex(sc.common))
@@ -160,6 +161,7 @@ def run_volatility(
     out = out[1:] + out[:1]
     return {
         "symbols": symbols,
+        "dropped": sc.dropped,
         "periods": len(origins),
         "scored_periods": len(origins) - CAL_WARMUP,
         "calibration_periods": CAL_WARMUP,

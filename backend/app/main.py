@@ -1,5 +1,7 @@
 import asyncio
+import json
 import time
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
@@ -26,7 +28,7 @@ from app.schemas import (
 )
 from app.services import calibration
 from app.services.backtest import run_backtest
-from app.services.crosssection import FACTORS, ScoreCache, build_panel, run_crosssection
+from app.services.crosssection import FACTORS, ScoreCache, build_panel, progress, run_crosssection
 from app.services.fundamentals import FUNDAMENTALS, CachedFundamentals, YFinanceFundamentals
 from app.services.volatility import run_volatility
 from app.services.portfolio import Construction, TrialLog, run_portfolio, study_key
@@ -235,29 +237,69 @@ async def tokens(req: TokensRequest):
     return {"symbol": req.symbol.upper(), "interval": req.interval, "model": req.model, "latency_ms": round(t.ms), **result}
 
 
-async def _universe(symbols: list[str], interval: str, models: list[str], lookback: int, min_symbols: int = 4) -> dict:
-    """Closed bars for each distinct symbol, after checking every model can take the lookback."""
+FETCH_CONCURRENCY = 16  # Yahoo rate-limits bursts; index-sized universes fetch this many at a time
+UNIVERSES = json.loads((Path(__file__).parent / "universes.json").read_text())
+
+
+async def _gather_limited(fn, items, limit: int = FETCH_CONCURRENCY) -> list:
+    sem = asyncio.Semaphore(limit)
+
+    async def one(x):
+        async with sem:
+            try:
+                return await run_in_threadpool(fn, x)
+            except Exception as e:  # reported per symbol by the caller
+                return e
+
+    return await asyncio.gather(*(one(x) for x in items))
+
+
+async def _universe(
+    symbols: list[str], interval: str, models: list[str], lookback: int, min_symbols: int = 4
+) -> tuple[dict, list[str]]:
+    """Closed bars for each distinct symbol that loads, plus the ones that didn't.
+
+    Every model is checked against the lookback first. Symbols Yahoo has no data for are skipped
+    (an index list always has a few renamed or delisted tickers), as long as enough remain.
+    """
     symbols = list(dict.fromkeys(s.strip().upper() for s in symbols if s.strip()))
     if len(symbols) < min_symbols:
         raise HTTPException(422, f"Need at least {min_symbols} distinct symbols to rank.")
     for m in models:
         _check_lookback(m, lookback, lookback)
     now = time.time()
-    loaded = await asyncio.gather(*(_load(s, interval) for s in symbols))
-    return {s: closed_bars(df, interval, now) for s, df in zip(symbols, loaded)}
+    loaded = await _gather_limited(lambda s: market.get(s, interval), symbols)
+    frames = {s: closed_bars(df, interval, now) for s, df in zip(symbols, loaded) if not isinstance(df, Exception)}
+    failed = [s for s, df in zip(symbols, loaded) if isinstance(df, Exception)]
+    if len(frames) < min_symbols:
+        first = next(e for e in loaded if isinstance(e, Exception))
+        raise HTTPException(404, f"Only {len(frames)} of {len(symbols)} symbols loaded. {first}")
+    return frames, failed
 
 
 async def _fundamentals(symbols, names) -> dict:
     """Point-in-time fundamentals per symbol, fetched only when some are asked for."""
     if not names:
         return {}
-    loaded = await asyncio.gather(*(run_in_threadpool(funds.get, s) for s in symbols))
-    return dict(zip(symbols, loaded))
+    loaded = await _gather_limited(funds.get, symbols, limit=8)
+    return {s: f for s, f in zip(symbols, loaded) if not isinstance(f, Exception)}
+
+
+@app.get("/api/universes")
+def universes():
+    """Index constituent lists (today's members, see scripts/update_universes.py)."""
+    return UNIVERSES
+
+
+@app.get("/api/progress")
+def research_progress():
+    """Model forecasts done / needed for the research run in flight."""
+    return progress.snapshot()
 
 
 @app.post("/api/crosssection")
 async def crosssection(req: CrossSectionRequest):
-    frames = await _universe(req.symbols, req.interval, req.models, req.lookback)
+    frames, failed = await _universe(req.symbols, req.interval, req.models, req.lookback)
     use = list(dict.fromkeys(req.fundamentals))
     fund = await _fundamentals(list(frames), use)
     with Timer() as t:
@@ -283,7 +325,8 @@ async def crosssection(req: CrossSectionRequest):
             )
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
-    return {"interval": req.interval, "horizon": req.horizon, "buckets": req.buckets, "latency_ms": round(t.ms), **result}
+    return {"interval": req.interval, "horizon": req.horizon, "buckets": req.buckets, "latency_ms": round(t.ms),
+            **result, "unavailable": failed}
 
 
 @app.post("/api/portfolio")
@@ -291,7 +334,7 @@ async def portfolio(req: PortfolioRequest):
     names = list(dict.fromkeys(s.name for s in req.signals))
     models = [n for n in names if n not in FACTORS and n not in FUNDAMENTALS]
     use = [n for n in names if n in FUNDAMENTALS]
-    frames = await _universe(req.symbols, req.interval, models, req.lookback)
+    frames, failed = await _universe(req.symbols, req.interval, models, req.lookback)
     fund = await _fundamentals(list(frames), use)
     c = req.construction
     with Timer() as t:
@@ -317,7 +360,7 @@ async def portfolio(req: PortfolioRequest):
     # Everything that shapes the result except the universe/interval/horizon, which define the study
     config = req.model_dump(exclude={"symbols", "interval", "horizon"})
     config["signals"] = [s for s in config["signals"] if s["name"] in names]
-    study = study_key(list(frames), req.interval, req.horizon)
+    study = study_key(panel.symbols, req.interval, req.horizon)
     trial_id, deflation = await run_in_threadpool(trials.record, study, {**config, "horizon": req.horizon, "interval": req.interval}, result)
     leaders = await run_in_threadpool(trials.study, study)
     return {
@@ -328,13 +371,15 @@ async def portfolio(req: PortfolioRequest):
         "deflation": deflation,
         "study": [{"id": r["id"], "name": r["name"], "config": r["config"], "metrics": r["metrics"]} for r in leaders[:10]],
         **result,
+        "dropped": list(panel.dropped),
+        "unavailable": failed,
     }
 
 
 @app.post("/api/volatility")
 async def volatility(req: VolatilityRequest):
     models = list(dict.fromkeys(req.models))
-    frames = await _universe(req.symbols, req.interval, models, req.lookback, min_symbols=1)
+    frames, failed = await _universe(req.symbols, req.interval, models, req.lookback, min_symbols=1)
     with Timer() as t:
         try:
             result = await run_in_threadpool(
@@ -346,7 +391,7 @@ async def volatility(req: VolatilityRequest):
             )
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
-    return {"interval": req.interval, "horizon": req.horizon, "latency_ms": round(t.ms), **result}
+    return {"interval": req.interval, "horizon": req.horizon, "latency_ms": round(t.ms), **result, "unavailable": failed}
 
 
 @app.get("/api/portfolio/recipes")

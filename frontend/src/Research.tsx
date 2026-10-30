@@ -12,8 +12,8 @@ import {
 import { LongShortChart } from './charts'
 import { FUNDAMENTAL_HINTS, MODEL_COLORS, signalColor, signalLabel } from './theme'
 import { pct, rate } from './format'
-import { Slider, Stat } from './ui'
-import { UNIVERSES } from './universes'
+import { RunNote, Slider, Stat } from './ui'
+import { estimate, runningLabel, UNIVERSES, useProgress, useUniverses } from './universes'
 
 const CHALLENGERS: Challenger[] = ['naive', 'garch', 'chronos']
 const FUNDAMENTALS: Fundamental[] = ['surprise', 'revisions', 'value', 'size']
@@ -39,6 +39,8 @@ export function ResearchView({ onError }: { onError: (msg: string | null) => voi
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<CrossSectionResponse | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
+  const { presets, asOf } = useUniverses()
+  const prog = useProgress(busy)
 
   const list = [...new Set(symbols.split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean))]
   const models: ModelName[] = [...(kronos ? [kronos] : []), ...rivals]
@@ -83,15 +85,20 @@ export function ResearchView({ onError }: { onError: (msg: string | null) => voi
         </p>
         <div className="setup-grid">
           <label>
-            universe ({list.length} symbols, 4–30)
+            universe ({list.length} symbols, 4–700)
             <input className="field" value={symbols} onChange={(e) => setSymbols(e.target.value)} spellCheck={false} />
             <div className="quick">
-              {Object.entries(UNIVERSES).map(([name, u]) => (
+              {Object.entries(presets).map(([name, u]) => (
                 <button key={name} onClick={() => setSymbols(u.join(', '))}>
                   {name}
                 </button>
               ))}
             </div>
+            {list.length > 30 && asOf && (
+              <span className="muted small">
+                index lists are today's members (as of {asOf}): names that fell out or were delisted are missing, which flatters backtests
+              </span>
+            )}
           </label>
           <label>
             bars
@@ -146,8 +153,11 @@ export function ResearchView({ onError }: { onError: (msg: string | null) => voi
           </label>
         </div>
         <button className="primary start" disabled={busy || list.length < 4 || models.length === 0} onClick={run}>
-          {busy ? `▶ running ${periods * list.length * models.length} forecasts…` : '▶ Run research'}
+          {busy ? runningLabel(prog, 'running') : '▶ Run research'}
         </button>
+        {!busy && estimate(periods * list.length, samples, horizon, kronos != null) && (
+          <span className="muted small"> {estimate(periods * list.length, samples, horizon, kronos != null)}</span>
+        )}
       </div>
 
       {result && sel && (
@@ -159,6 +169,7 @@ export function ResearchView({ onError }: { onError: (msg: string | null) => voi
             <Stat label="universe / period" value={pct(result.universe.mean, 2)} hint="equal-weight, dotted line" />
             <Stat label="runtime" value={`${(result.latency_ms / 1000).toFixed(0)}s`} />
           </div>
+          <RunNote dropped={result.dropped} unavailable={result.unavailable} />
 
           <div className="panel-title">Signals</div>
           <table className="tok-table league research">

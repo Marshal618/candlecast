@@ -269,7 +269,25 @@ export interface CrossSectionSignal {
   corr: Partial<Record<Factor, number>>
 }
 
-export interface CrossSectionResponse {
+// Symbols left out of a run: `dropped` had too little history, `unavailable` had no data at all
+export interface RunCoverage {
+  dropped: string[]
+  unavailable: string[]
+}
+
+export interface IndexUniverses {
+  as_of: string
+  source: string
+  universes: Record<string, string[]>
+}
+
+export interface ResearchProgress {
+  label: string | null
+  done: number
+  total: number
+}
+
+export interface CrossSectionResponse extends RunCoverage {
   interval: '1d' | '1h'
   horizon: number
   buckets: number
@@ -312,7 +330,7 @@ export interface VolForecast {
   calibrated: (number | null)[][]
 }
 
-export interface VolatilityResponse {
+export interface VolatilityResponse extends RunCoverage {
   interval: '1d' | '1h'
   horizon: number
   latency_ms: number
@@ -376,7 +394,7 @@ export interface Trial {
   final_blend?: Partial<Record<SignalName, number>>
 }
 
-export interface PortfolioResponse {
+export interface PortfolioResponse extends RunCoverage {
   interval: '1d' | '1h'
   horizon: number
   latency_ms: number
@@ -539,6 +557,8 @@ export const api = {
     save: (trial_id: number, name: string) =>
       request<Trial>('/api/portfolio/recipes', { method: 'POST', body: JSON.stringify({ trial_id, name }) }),
   },
+  universes: () => request<IndexUniverses>('/api/universes'),
+  progress: () => request<ResearchProgress>('/api/progress'),
   volatility: (body: VolatilityRequest) =>
     request<VolatilityResponse>('/api/volatility', { method: 'POST', body: JSON.stringify(body) }),
   crosssection: (body: CrossSectionRequest) =>

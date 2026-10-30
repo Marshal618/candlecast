@@ -12,8 +12,8 @@ import {
 import { CurvesChart, type Curve } from './charts'
 import { COLORS, signalColor, signalLabel } from './theme'
 import { pct, rate } from './format'
-import { Slider, Stat } from './ui'
-import { UNIVERSES } from './universes'
+import { RunNote, Slider, Stat } from './ui'
+import { estimate, runningLabel, UNIVERSES, useProgress, useUniverses } from './universes'
 
 // Fundamentals are rebuilt point-in-time; ETFs and crypto have none and sit mid-ranking on them
 const OTHER_SIGNALS: SignalName[] = ['reversal', 'momentum', 'surprise', 'revisions', 'value', 'size', 'naive', 'garch', 'chronos']
@@ -58,6 +58,8 @@ export function PortfolioView({ onError }: { onError: (msg: string | null) => vo
     api.portfolio.recipes().then(setSaved).catch(() => {})
   }, [])
 
+  const { presets, asOf } = useUniverses()
+  const prog = useProgress(busy)
   const list = [...new Set(symbols.split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean))]
   const available: SignalName[] = [kronos, ...OTHER_SIGNALS]
   const active = available.filter((s) => weights[s] != null)
@@ -130,7 +132,7 @@ export function PortfolioView({ onError }: { onError: (msg: string | null) => vo
     [result],
   )
 
-  const models = active.filter((s) => !['reversal', 'momentum'].includes(s))
+  const models = active.filter((s) => !['reversal', 'momentum', 'surprise', 'revisions', 'value', 'size'].includes(s))
   return (
     <>
       <div className="sim-setup">
@@ -142,15 +144,20 @@ export function PortfolioView({ onError }: { onError: (msg: string | null) => vo
         </p>
         <div className="setup-grid">
           <label>
-            universe ({list.length} symbols, 4–30)
+            universe ({list.length} symbols, 4–700)
             <input className="field" value={symbols} onChange={(e) => setSymbols(e.target.value)} spellCheck={false} />
             <div className="quick">
-              {Object.entries(UNIVERSES).map(([name, u]) => (
+              {Object.entries(presets).map(([name, u]) => (
                 <button key={name} onClick={() => setSymbols(u.join(', '))}>
                   {name}
                 </button>
               ))}
             </div>
+            {list.length > 30 && asOf && (
+              <span className="muted small">
+                index lists are today's members (as of {asOf}): names that fell out or were delisted are missing, which flatters backtests
+              </span>
+            )}
           </label>
           <label>
             bars
@@ -273,12 +280,11 @@ export function PortfolioView({ onError }: { onError: (msg: string | null) => vo
         </details>
 
         <button className="primary start" disabled={busy || list.length < 4 || active.length === 0} onClick={run}>
-          {busy
-            ? models.length
-              ? `▶ running (new forecasts: up to ${periods * list.length * models.length})…`
-              : '▶ running…'
-            : '▶ Run portfolio'}
+          {busy ? runningLabel(prog, 'running') : '▶ Run portfolio'}
         </button>
+        {!busy && estimate(periods * list.length * models.length, samples, horizon, models.length > 0) && (
+          <span className="muted small"> {estimate(periods * list.length * models.length, samples, horizon, models.length > 0)}</span>
+        )}
       </div>
 
       {result && <PortfolioResult r={result} curves={curves} recipeName={recipeName} setRecipeName={setRecipeName} save={save} />}
@@ -346,9 +352,14 @@ function PortfolioResult({
   const d = r.deflation
   const last = r.weights.at(-1) ?? []
   const maxW = Math.max(...last.map(Math.abs), 1e-9)
-  const order = last.map((w, i) => [w, i] as const).sort((a, b) => b[0] - a[0])
+  const sorted = last.map((w, i) => [w, i] as const).sort((a, b) => b[0] - a[0])
+  // Big universes: the 15 largest longs and shorts; flat names are left out of the list
+  const SHOW = 15
+  const order = sorted.length > 2 * SHOW ? [...sorted.slice(0, SHOW), ...sorted.slice(-SHOW).filter(([w]) => w < 0)] : sorted
+  const hidden = sorted.length - order.length
   return (
     <>
+      <RunNote dropped={r.dropped} unavailable={r.unavailable} />
       <div className="stats">
         <Stat label="ann return" value={pct(m.ann_return, 1)} tone={m.ann_return >= 0 ? 'up' : 'down'} hint={`universe ${pct(m.bench_ann_return, 1)}`} />
         <Stat label="ann vol" value={pct(m.ann_vol, 1).slice(1)} hint={`ex-ante ${pct(m.ex_ante_vol, 1).slice(1)}`} />
@@ -400,6 +411,7 @@ function PortfolioResult({
               ))}
             </tbody>
           </table>
+          {hidden > 0 && <p className="muted small">+{hidden} smaller or flat positions not listed</p>}
         </div>
         <div>
           <div className="panel-title">Blend</div>
