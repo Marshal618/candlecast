@@ -24,6 +24,7 @@ import { SimView } from './Sim'
 import { ResearchView } from './Research'
 import { PortfolioView } from './Portfolio'
 import { VolatilityView } from './Volatility'
+import { EventsView } from './Events'
 import './App.css'
 
 const INTERVALS: Interval[] = ['5m', '15m', '1h', '1d']
@@ -65,7 +66,7 @@ export default function App() {
   const [temperature, setTemperature] = useState(1.0)
   const [topP, setTopP] = useState(0.9)
   const [btWindows, setBtWindows] = useState(30)
-  const [tab, setTab] = useState<'forecast' | 'backtest' | 'tokens' | 'journal' | 'research' | 'volatility' | 'portfolio' | 'sim'>('forecast')
+  const [tab, setTab] = useState<'forecast' | 'backtest' | 'tokens' | 'journal' | 'research' | 'events' | 'volatility' | 'portfolio' | 'sim'>('forecast')
   const [journal, setJournal] = useState<JournalReport | null>(null)
   const [journalScope, setJournalScope] = useState<'symbol' | 'all'>('all')
   const [tokens, setTokens] = useState<TokensResponse | null>(null)
@@ -397,6 +398,9 @@ export default function App() {
           <button className={tab === 'research' ? 'active' : ''} onClick={() => setTab('research')}>
             Research
           </button>
+          <button className={tab === 'events' ? 'active' : ''} onClick={() => setTab('events')}>
+            Events
+          </button>
           <button className={tab === 'volatility' ? 'active' : ''} onClick={() => setTab('volatility')}>
             Volatility
           </button>
@@ -415,6 +419,8 @@ export default function App() {
           <SimView watchlist={watchlist} onError={setError} />
         ) : tab === 'research' ? (
           <ResearchView onError={setError} />
+        ) : tab === 'events' ? (
+          <EventsView onError={setError} />
         ) : tab === 'volatility' ? (
           <VolatilityView onError={setError} />
         ) : tab === 'portfolio' ? (

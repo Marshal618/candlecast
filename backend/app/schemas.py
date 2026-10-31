@@ -91,6 +91,15 @@ class CrossSectionRequest(BaseModel):
     fundamentals: list[Fundamental] = Field([], max_length=4)
 
 
+class EventStudyRequest(BaseModel):
+    """Abnormal returns around every earnings report, by surprise (see services/events.py)."""
+
+    symbols: list[str] = Field(..., min_length=4, max_length=MAX_UNIVERSE)
+    pre: int = Field(5, ge=0, le=20)  # trading days shown before day 0
+    post: int = Field(60, ge=5, le=120)  # trading days after
+    groups: int = Field(5, ge=2, le=10)
+
+
 class VolatilityRequest(BaseModel):
     """Score each model's sampled spread as a volatility forecast (see services/volatility.py)."""
 

@@ -13,6 +13,7 @@ from app.config import settings
 from app.schemas import (
     BacktestRequest,
     CrossSectionRequest,
+    EventStudyRequest,
     ForecastRequest,
     Interval,
     ModelName,
@@ -31,6 +32,7 @@ from app.services.backtest import run_backtest
 from app.services.crosssection import FACTORS, ScoreCache, build_panel, progress, run_crosssection
 from app.services.fundamentals import FUNDAMENTALS, CachedFundamentals, YFinanceFundamentals
 from app.services.volatility import run_volatility
+from app.services.events import run_event_study
 from app.services.portfolio import Construction, TrialLog, run_portfolio, study_key
 from app.services.journal import Journal, forecast_entry
 from app.services.sim_session import SimError, SimStore
@@ -321,12 +323,27 @@ async def crosssection(req: CrossSectionRequest):
                     cache=scores,
                     fundamentals=fund,
                     use_fundamentals=use,
+                    sectors=UNIVERSES.get("sectors"),
                 )
             )
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
     return {"interval": req.interval, "horizon": req.horizon, "buckets": req.buckets, "latency_ms": round(t.ms),
             **result, "unavailable": failed}
+
+
+@app.post("/api/events")
+async def events(req: EventStudyRequest):
+    frames, failed = await _universe(req.symbols, "1d", [], 32)
+    fund = await _fundamentals(list(frames), ["surprise"])
+    with Timer() as t:
+        try:
+            result = await run_in_threadpool(
+                lambda: run_event_study(frames, fund, pre=req.pre, post=req.post, groups=req.groups)
+            )
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+    return {"pre": req.pre, "post": req.post, "latency_ms": round(t.ms), **result, "unavailable": failed}
 
 
 @app.post("/api/portfolio")

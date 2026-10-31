@@ -22,6 +22,15 @@ Walk-forward, at each rebalance date (every `horizon` bars, non-overlapping):
    predicts mean reversion, so a high correlation with reversal is expected). Residual RankIC
    regresses the factors' ranks out of the model's ranks each period and scores what remains:
    the model's (or fundamental's) skill beyond momentum and reversal.
+5. Implementation checks, as in Alphalens:
+   - Rank autocorrelation: how similar each ranking is to the previous one. Low means high turnover.
+   - IC decay: RankIC of each ranking against the next few periods' returns too. A signal whose
+     IC lasts can be rebalanced less often.
+   - Break-even cost: the cost per unit traded (bps) at which the long-short's gross edge is gone.
+6. Sectors (GICS, when the universe has them): a ranking can "work" by being long one sector and
+   short another. Sector-neutral RankIC ranks each signal and return within its sector, the
+   sector-neutral long-short buckets on within-sector ranks, and the table shows the plain
+   long-short's average net weight per sector and the RankIC inside each sector.
 
 Symbols are aligned by calendar date (daily) or UTC hour (hourly), and rebalances use dates every
 symbol traded. In large universes, symbols without enough history for every requested rebalance
@@ -47,6 +56,8 @@ from app.services.strategy import _max_drawdown, _sharpe, bars_per_year
 MOMENTUM_BARS = 60
 MOMENTUM_SKIP = 5
 FACTORS = ("momentum", "reversal")
+DECAY_LAGS = 4  # IC decay: this period's ranking against returns 0..3 periods ahead
+MIN_SECTOR = 5  # members a sector needs for its own RankIC
 CHUNK = 512  # contexts per model call; each chunk is cached as soon as it's done, so long runs resume
 
 
@@ -117,7 +128,8 @@ def bucket_weights(score: np.ndarray, buckets: int) -> tuple[np.ndarray, np.ndar
 
 def evaluate(score: np.ndarray, fwd: np.ndarray, buckets: int, cost_bps: float, periods_per_year: float) -> dict:
     """Score a (periods, symbols) signal against (periods, symbols) forward returns."""
-    rank_ic = _rowwise_corr(_ranks(score), _ranks(fwd))
+    score_ranks, fwd_ranks = _ranks(score), _ranks(fwd)
+    rank_ic = _rowwise_corr(score_ranks, fwd_ranks)
     b, w = bucket_weights(score, buckets)
     bucket_ret = np.array([[fwd[t, b[t] == k].mean() for k in range(buckets)] for t in range(len(fwd))])
     gross = (w * fwd).sum(axis=1)
@@ -126,6 +138,10 @@ def evaluate(score: np.ndarray, fwd: np.ndarray, buckets: int, cost_bps: float, 
     turnover[-1] += np.abs(w[-1]).sum()  # close out at the end
     net = gross - turnover * cost_bps / 1e4
     equity = np.cumprod(1 + net)
+    decay = [_ic_stats(_rowwise_corr(score_ranks[: len(fwd) - k], fwd_ranks[k:]))["mean"]
+             for k in range(min(DECAY_LAGS, len(fwd) - 1))]
+    autocorr = _rowwise_corr(score_ranks[1:], score_ranks[:-1])
+    autocorr = autocorr[np.isfinite(autocorr)]
     return {
         "ic": _ic_stats(_rowwise_corr(score, fwd)),
         "rank_ic": _ic_stats(rank_ic),
@@ -141,8 +157,42 @@ def evaluate(score: np.ndarray, fwd: np.ndarray, buckets: int, cost_bps: float, 
             "hit_rate": float(np.mean(net > 0)),
             # Share of the book traded per rebalance (1 = every position replaced), excluding entry/exit
             "turnover": float((turnover[1:-1] if len(turnover) > 2 else turnover).mean() / 4),
+            # Cost per unit traded (bps) that would eat the whole gross edge; None if there's no edge
+            "breakeven_bps": float(gross.mean() / turnover.mean() * 1e4) if gross.mean() > 0 else None,
         },
+        "rank_autocorr": float(autocorr.mean()) if len(autocorr) else 0.0,
+        "ic_decay": decay,
         "equity": [float(x) for x in equity],
+    }
+
+
+def group_ranks(x: np.ndarray, groups: np.ndarray) -> np.ndarray:
+    """Per row, each cell's percentile rank within its group, centred on 0 (a group of one scores 0)."""
+    out = np.zeros_like(x, dtype=float)
+    for g in np.unique(groups):
+        m = groups == g
+        if m.sum() > 1:
+            out[:, m] = (np.vstack([rankdata(row) for row in x[:, m]]) - 0.5) / m.sum() - 0.5
+    return out
+
+
+def sector_report(
+    score: np.ndarray, fwd: np.ndarray, sectors: np.ndarray, buckets: int, cost_bps: float, periods_per_year: float
+) -> dict:
+    """How much of a signal survives within sectors, and which sectors its long-short leans on."""
+    neutral = group_ranks(score, sectors)
+    _, w = bucket_weights(score, buckets)
+    by_sector, exposure = {}, {}
+    for g in np.unique(sectors):
+        m = sectors == g
+        exposure[str(g)] = float(w[:, m].sum(axis=1).mean())
+        if m.sum() >= MIN_SECTOR:
+            by_sector[str(g)] = {"n": int(m.sum()), **_ic_stats(_rowwise_corr(_ranks(score[:, m]), _ranks(fwd[:, m])))}
+    return {
+        "rank_ic": _ic_stats(_rowwise_corr(neutral, group_ranks(fwd, sectors))),
+        "long_short": evaluate(neutral, fwd, buckets, cost_bps, periods_per_year)["long_short"],
+        "by_sector": by_sector,
+        "exposure": exposure,
     }
 
 
@@ -402,6 +452,7 @@ def run_crosssection(
     cache: ScoreCache | None = None,
     fundamentals: dict[str, Fundamentals] | None = None,
     use_fundamentals: list[str] = (),
+    sectors: dict[str, str] | None = None,
 ) -> dict:
     if buckets > len(frames):
         raise ValueError(f"{buckets} buckets need at least {buckets} symbols; got {len(frames)}.")
@@ -412,6 +463,11 @@ def run_crosssection(
     )
     signals, fwd = p.signals, p.fwd
     universe = np.cumprod(1 + fwd.mean(axis=1))
+    # Sector checks only when most symbols have one and at least two sectors have several members;
+    # unclassified symbols (ETFs, crypto, names off the index lists) form a group of their own
+    sec = np.array([(sectors or {}).get(s) or "Unclassified" for s in p.symbols])
+    _, counts = np.unique(sec[sec != "Unclassified"], return_counts=True)
+    use_sectors = np.mean(sec != "Unclassified") >= 0.5 and (counts >= 2).sum() >= 2
     out = []
     for name, score in signals.items():
         r = evaluate(score, fwd, buckets, cost_bps, p.periods_per_year)
@@ -420,6 +476,8 @@ def run_crosssection(
         r["corr"] = {f: _mean_rank_corr(score, signals[f]) for f in FACTORS if f != name}
         if name in FUNDAMENTALS:
             r["coverage"] = p.coverage[name]
+        if use_sectors:
+            r["sector"] = sector_report(score, fwd, sec, buckets, cost_bps, p.periods_per_year)
         if name not in FACTORS:
             # What's left of the ranking once momentum and reversal are accounted for
             resid = residual_scores(score, [signals[f] for f in FACTORS])
@@ -436,5 +494,6 @@ def run_crosssection(
         "periods_per_year": p.periods_per_year,
         "universe": {"equity": [float(x) for x in universe], "mean": float(fwd.mean())},
         "dispersion": float(fwd.std(axis=1).mean()),
+        "sectors": {str(k): int(v) for k, v in zip(*np.unique(sec, return_counts=True))} if use_sectors else None,
         "signals": out,
     }

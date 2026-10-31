@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from app.services.crosssection import bucket_weights, run_crosssection
+from app.services.crosssection import _ranks, _rowwise_corr, bucket_weights, run_crosssection, sector_report
 
 HORIZON = 5
 
@@ -157,3 +157,61 @@ def test_interrupted_run_resumes_from_cached_chunks(tmp_path, monkeypatch):
     fc = PeekingForecaster(frames)
     _run(frames, fc, cache=cache)
     assert len(fc.contexts) == 12 * 6 - 30  # only the chunks that never finished
+
+
+def _sector_universe():
+    """Two sectors whose members share a strong common move, plus a little idiosyncratic noise."""
+    rng = np.random.default_rng(3)
+    idx = pd.bdate_range("2022-01-03", periods=400, tz="America/New_York")
+    common = {g: rng.normal(0, 0.03, len(idx)) for g in "AB"}
+    frames, sectors = {}, {}
+    for k in range(8):
+        g = "AB"[k % 2]
+        close = 100 * np.exp(np.cumsum(common[g] + rng.normal(0, 0.005, len(idx))))
+        frames[f"S{k}"] = pd.DataFrame(
+            {"open": close, "high": close, "low": close, "close": close, "volume": 1e6, "amount": 1e8}, index=idx
+        )
+        sectors[f"S{k}"] = f"Sector {g}"
+    return frames, sectors
+
+
+def test_sector_bet_scores_well_overall_but_zero_within_sectors():
+    rng = np.random.default_rng(3)
+    sectors = np.array(["A"] * 6 + ["B"] * 6)
+    move = rng.normal(0, 0.05, (30, 2))
+    fwd = move[:, (sectors == "B").astype(int)] + rng.normal(0, 0.005, (30, 12))
+    bet = move[:, (sectors == "B").astype(int)]  # knows each sector's move, nothing within it
+    rep = sector_report(bet, fwd, sectors, buckets=2, cost_bps=0, periods_per_year=12)
+    assert _rowwise_corr(_ranks(bet), _ranks(fwd)).mean() > 0.5
+    assert rep["rank_ic"]["mean"] == 0.0  # constant within each sector: no ranking left
+    assert set(rep["by_sector"]) == {"A", "B"} and abs(rep["by_sector"]["A"]["mean"]) < 0.2
+    # The plain long-short is all-in on one sector each period, net zero on average only by luck
+    assert sum(rep["exposure"].values()) == pytest.approx(0)
+
+
+def test_research_reports_sectors_when_symbols_are_classified():
+    frames, sectors = _sector_universe()
+    res = _run(frames, PeekingForecaster(frames), sectors=sectors, buckets=2, periods=20)
+    sig = res["signals"][0]
+    assert res["sectors"] == {"Sector A": 4, "Sector B": 4}
+    assert sig["sector"]["rank_ic"]["mean"] == pytest.approx(1.0)
+    assert set(sig["sector"]["exposure"]) == {"Sector A", "Sector B"}
+
+
+def test_sector_checks_need_classified_symbols():
+    frames = _universe()
+    res = _run(frames, PeekingForecaster(frames), sectors={"S0": "Tech"})
+    assert res["sectors"] is None and "sector" not in res["signals"][0]
+
+
+def test_breakeven_cost_zeroes_the_net_edge_and_decay_starts_at_rank_ic():
+    frames = _universe()
+    sig = _run(frames, PeekingForecaster(frames))["signals"][0]
+    be = sig["long_short"]["breakeven_bps"]
+    assert be > 0
+    at_be = _run(frames, PeekingForecaster(frames), cost_bps=be)["signals"][0]
+    assert at_be["long_short"]["net_mean"] == pytest.approx(0, abs=1e-12)
+    assert sig["ic_decay"][0] == pytest.approx(sig["rank_ic"]["mean"])
+    assert len(sig["ic_decay"]) == 4 and -1 <= sig["rank_autocorr"] <= 1
+    inverted = _run(frames, PeekingForecaster(frames, sign=-1.0))["signals"][0]
+    assert inverted["long_short"]["breakeven_bps"] is None

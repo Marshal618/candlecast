@@ -23,6 +23,22 @@ const color = (s: CrossSectionSignal) => signalColor(s.name)
 const num = (x: number, d = 3) => (x >= 0 ? '+' : '') + x.toFixed(d)
 // |t| > 2 is the conventional "unlikely to be luck" bar for a mean IC
 const tone = (s: IcStats) => (s.t_stat >= 2 ? 'up' : s.t_stat <= -2 ? 'down' : '')
+const bps = (x: number | null) => (x == null ? 'no edge' : x >= 1000 ? '>999 bps' : `${x.toFixed(0)} bps`)
+const SECTOR_SHORT: Record<string, string> = {
+  'Communication Services': 'comms',
+  'Consumer Discretionary': 'discr',
+  'Consumer Staples': 'staples',
+  Energy: 'energy',
+  Financials: 'fin',
+  'Health Care': 'health',
+  Industrials: 'indus',
+  'Information Technology': 'tech',
+  Materials: 'mater',
+  'Real Estate': 'reits',
+  Utilities: 'utils',
+  Unclassified: 'other',
+}
+const short = (sector: string) => SECTOR_SHORT[sector] ?? sector.slice(0, 6).toLowerCase()
 
 export function ResearchView({ onError }: { onError: (msg: string | null) => void }) {
   const [symbols, setSymbols] = useState(UNIVERSES.sectors.join(', '))
@@ -180,10 +196,12 @@ export function ResearchView({ onError }: { onError: (msg: string | null) => voi
                 <th>t</th>
                 <th>ic &gt; 0</th>
                 <th>beyond factors</th>
+                {result.sectors && <th>within sectors</th>}
                 <th>l/s net / period</th>
                 <th>l/s sharpe</th>
                 <th>max dd</th>
                 <th>turnover</th>
+                <th>break-even</th>
                 <th>ρ reversal</th>
                 <th>ρ momentum</th>
               </tr>
@@ -205,10 +223,18 @@ export function ResearchView({ onError }: { onError: (msg: string | null) => voi
                   <td className={s.rank_ic_residual ? tone(s.rank_ic_residual) : ''}>
                     {s.rank_ic_residual ? `${num(s.rank_ic_residual.mean)} (t ${num(s.rank_ic_residual.t_stat, 1)})` : '—'}
                   </td>
+                  {result.sectors && (
+                    <td className={s.sector ? tone(s.sector.rank_ic) : ''}>
+                      {s.sector ? `${num(s.sector.rank_ic.mean)} (t ${num(s.sector.rank_ic.t_stat, 1)})` : '—'}
+                    </td>
+                  )}
                   <td className={s.long_short.net_mean > 0 ? 'up' : 'down'}>{pct(s.long_short.net_mean, 2)}</td>
                   <td>{s.long_short.sharpe.toFixed(2)}</td>
                   <td>{pct(s.long_short.max_drawdown, 1)}</td>
                   <td>{rate(s.long_short.turnover)}</td>
+                  <td className={s.long_short.breakeven_bps != null && s.long_short.breakeven_bps < Number(cost) * 2 ? 'down' : ''}>
+                    {bps(s.long_short.breakeven_bps)}
+                  </td>
                   <td>{s.corr.reversal != null ? num(s.corr.reversal, 2) : '—'}</td>
                   <td>{s.corr.momentum != null ? num(s.corr.momentum, 2) : '—'}</td>
                 </tr>
@@ -218,7 +244,8 @@ export function ResearchView({ onError }: { onError: (msg: string | null) => voi
           <p className="muted small">
             rank ic = spearman correlation between a signal's ranking and the realized next-{result.horizon}-bar returns,
             averaged over rebalances; green / red when |t| &gt; 2. "beyond factors" scores the ranking left after regressing
-            out momentum and reversal. fundamentals (dotted) only use data public by each rebalance; funds and crypto
+            out momentum and reversal.{result.sectors && ' "within sectors" ranks signal and returns inside each GICS sector, so a sector bet scores zero.'}{' '}
+            break-even = cost per unit traded that would eat the whole gross edge (red when under twice your cost). fundamentals (dotted) only use data public by each rebalance; funds and crypto
             have none. l/s = long the top bucket, short the bottom, equal weight, net of costs. ρ = average
             rank correlation with each factor. click a row for its buckets.
           </p>
@@ -256,6 +283,52 @@ export function ResearchView({ onError }: { onError: (msg: string | null) => voi
               </p>
             </div>
           </div>
+
+          <div className="token-grid">
+            <div>
+              <div className="panel-title">IC decay: {label(sel)}</div>
+              <Bars
+                values={sel.ic_decay}
+                labels={sel.ic_decay.map((_, k) => (k === 0 ? 'next' : `+${k * result.horizon} bars`))}
+                format={(v) => num(v)}
+              />
+              <p className="muted small">
+                each ranking scored against the next period's returns, then the ones after. an ic that lasts can be
+                traded less often for the same edge. rank autocorrelation {num(sel.rank_autocorr, 2)}: how much of each
+                ranking carries over to the next (1 = never changes).
+              </p>
+            </div>
+            {sel.sector && (
+              <div>
+                <div className="panel-title">Sector exposure: {label(sel)}</div>
+                <Bars
+                  values={Object.values(sel.sector.exposure)}
+                  labels={Object.keys(sel.sector.exposure).map(short)}
+                  format={(v) => pct(v, 0)}
+                />
+                <p className="muted small">
+                  average net weight of the long-short in each sector (long side sums to +100%, short to −100%). bars
+                  near zero mean it picks stocks; tall bars mean it's partly a sector bet. sector-neutral l/s: sharpe{' '}
+                  {sel.sector.long_short.sharpe.toFixed(2)}, {pct(sel.sector.long_short.net_mean, 2)} / period vs{' '}
+                  {sel.long_short.sharpe.toFixed(2)}, {pct(sel.long_short.net_mean, 2)} plain.
+                </p>
+              </div>
+            )}
+          </div>
+          {sel.sector && Object.keys(sel.sector.by_sector).length > 0 && (
+            <>
+              <div className="panel-title">Rank ic inside each sector: {label(sel)}</div>
+              <Bars
+                values={Object.values(sel.sector.by_sector).map((x) => x.mean)}
+                labels={Object.entries(sel.sector.by_sector).map(([k, x]) => `${short(k)} (${x.n})`)}
+                format={(v) => num(v)}
+              />
+              <p className="muted small">
+                the signal ranked only against stocks in the same sector (sectors with 5+ members; count in brackets).
+                one sector carrying the whole ic is fragile.
+              </p>
+            </>
+          )}
         </>
       )}
       {!result && !busy && (

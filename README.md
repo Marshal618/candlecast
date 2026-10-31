@@ -101,14 +101,15 @@ docker compose up --build     # single container on :8000 serving API and built 
 
 ```
 backend/
-  app/main.py                 FastAPI routes: /api/health, /api/candles, /api/forecast, /api/backtest, /api/strategy, /api/tokens, /api/journal, /api/crosssection, /api/volatility, /api/universes, /api/progress, /api/portfolio, /api/sim/*
+  app/main.py                 FastAPI routes: /api/health, /api/candles, /api/forecast, /api/backtest, /api/strategy, /api/tokens, /api/journal, /api/crosssection, /api/events, /api/volatility, /api/universes, /api/progress, /api/portfolio, /api/sim/*
   app/services/market_data.py yfinance provider, SQLite cache, future-timestamp projection
   app/services/forecaster.py  Kronos loading + independent sampled paths + quantile stats
   app/services/challengers.py naive / GARCH / Chronos-Bolt forecasters for comparison
   app/services/calibration.py conformal (CQR) calibration of forecast bands
   app/services/backtest.py    walk-forward evaluation with baselines
-  app/services/crosssection.py universe ranking research: RankIC, bucket and long-short portfolios, factors
-  app/universes.json          S&P 500 / 400 / 600 constituents (refresh: scripts/update_universes.py)
+  app/services/crosssection.py universe ranking research: RankIC, bucket and long-short portfolios, factors, sectors
+  app/services/events.py      earnings event study: abnormal returns around reports, by surprise
+  app/universes.json          S&P 500 / 400 / 600 constituents and GICS sectors (refresh: scripts/update_universes.py)
   app/services/fundamentals.py point-in-time earnings surprise, analyst revisions, earnings yield, size
   app/services/volatility.py  volatility forecast test: QLIKE, calibration, Diebold-Mariano vs EWMA
   app/services/portfolio.py   portfolio lab: signal blend, Ledoit-Wolf risk, construction, deflated Sharpe
@@ -122,6 +123,7 @@ frontend/
   src/App.tsx                 dashboard UI
   src/Sim.tsx                 market replay game UI
   src/Research.tsx            cross-sectional research UI
+  src/Events.tsx              earnings event study UI
   src/Volatility.tsx          volatility test UI
   src/Portfolio.tsx           portfolio lab UI
   src/charts.tsx              lightweight-charts candle/forecast/backtest charts
@@ -290,6 +292,88 @@ What it says:
   smallest of today's members are exactly the ones that grew into the index or narrowly survived.
   Expect most of it to vanish with point-in-time membership.
 - Revisions are still mostly momentum (ρ 0.52 in the S&P 500).
+
+## Factor report: sectors, turnover, decay
+
+The Research table also runs the checks Alphalens-style factor reports include, to show whether a
+signal could be traded and whether it is what it looks like:
+
+- **Within sectors**: the signal and the returns both ranked inside each GICS sector (sectors ship
+  with the index lists). A signal that is only "long banks, short tech" scores zero here. The
+  detail panel shows the plain long-short's average net weight per sector, a sector-neutral
+  long-short, and RankIC inside each sector with 5+ members.
+- **Break-even cost**: the cost per unit traded that would eat the whole gross long-short edge. It
+  turns red when it is under twice the cost you entered.
+- **IC decay** and **rank autocorrelation**: how long a ranking keeps predicting, and how much of it
+  carries over between rebalances. Slow signals can be traded less often.
+
+Sector checks run when at least half the symbols have a sector. ETFs, crypto and anything off the
+index lists count as one "unclassified" group.
+
+S&P 500 and S&P 600, 20-day rebalances, 60 periods, 5 buckets, cost 5 bps:
+
+| Signal | S&P 500 RankIC t | within sectors t | break-even | rank autocorr | S&P 600 RankIC t | within sectors t | break-even |
+|---|---|---|---|---|---|---|---|
+| earnings surprise | 1.82 | **2.66** | 53 bps | 0.76 | 1.79 | 1.60 | 33 bps |
+| analyst revisions | 0.18 | 0.38 | 8 bps | 0.76 | 0.20 | 0.24 | 6 bps |
+| earnings yield | 0.88 | 0.14 | 1 bp | 0.98 | 1.16 | 1.22 | 15 bps |
+| small size | 0.67 | 0.56 | 263 bps | 0.99 | **6.87** | **6.32** | 723 bps |
+| momentum | −0.72 | −0.65 | no edge | 0.63 | −0.43 | 0.03 | no edge |
+| reversal | −0.18 | −0.47 | no edge | 0.01 | 1.14 | 0.61 | 14 bps |
+
+What it adds:
+
+- **Earnings surprise gets stronger inside sectors** in large caps (t 1.8 → 2.7). Its edge survives
+  costs ten times higher than the 5 bps assumed.
+- **Earnings yield in the S&P 500 is a sector bet.** Its long-short averages +24% net in Financials
+  and −17% in Tech, and within sectors its RankIC is 0.002. Cheap stocks mean banks.
+- **Small size in the S&P 600 isn't a sector effect either** (t 6.3 within sectors). It barely
+  trades (autocorrelation 0.98), so costs don't touch it. That leaves survivorship as the main
+  suspect, as above.
+- Revisions and reversal trade a lot for little. Where they have a gross edge at all, it is gone
+  at 6–15 bps per unit traded.
+
+## Earnings event study
+
+The **Events** tab lines every earnings report up on its own day instead of sampling once a month:
+
+- **Day 0** is the first close after the report was public. Before-open reports count the same day,
+  after-close ones the next, the same rule as the fundamentals.
+- **Abnormal return** is the stock minus the 5%-trimmed average of every stock in the run that day.
+  Trimming keeps one bad Yahoo print from shifting everyone. CHRD has a +25,000% day in 2020, and
+  windows with a daily move beyond +300% or −90% are skipped as bad data.
+- **Groups**: each report is ranked by surprise against the others in its calendar quarter, then
+  split into groups. Cumulative abnormal return (CAR) is 0 at the close before day 0. The day-0 jump
+  is the reaction, and anything after is drift you could have bought at day 0's close.
+- **Significance**: the beats-minus-misses gap is averaged per quarter, and the t-stat is taken
+  across quarters. Reports in the same season move together, so pooling them would overstate it.
+
+Every report from Nov 2016 to Aug 2026 with a consensus estimate and 60 trading days after it (40
+quarters), 5 groups:
+
+| Beats − misses | S&P 500 (18,683 reports) | S&P 400 (14,107) | S&P 600 (19,954) |
+|---|---|---|---|
+| run-up, 5 days before | +0.49% (t 4.0) | +0.55% (t 3.6) | +0.52% (t 2.9) |
+| reaction, day 0 | +4.35% (t 24.2) | +6.12% (t 25.1) | +7.97% (t 26.7) |
+| drift to +5 days | +0.04% (t 0.3) | −0.31% (t −1.8) | +0.23% (t 1.5) |
+| drift to +20 days | +0.67% (t 2.8) | −0.51% (t −1.9) | +0.47% (t 1.6) |
+| drift to +60 days | **+1.75% (t 3.6)** | +0.53% (t 1.2) | **+1.36% (t 2.6)** |
+
+Drift by group, day 0 close to +60, S&P 500: biggest misses −0.27%, then −0.14%, −0.20%, +0.42%,
+biggest beats +1.47%.
+
+What it says:
+
+- **Post-earnings drift is still there in large caps**, though recent work argues it has largely
+  disappeared (Martineau 2022). It is slow: almost nothing in the first week, and most of it comes
+  between days 20 and 60.
+- **It's driven by beats.** The biggest beats keep rising, while the biggest misses barely keep
+  falling. In mid and small caps, the biggest misses actually drift *up* (+1.0% and +1.2%). That
+  could be overreaction, or survivorship: misses that led to delisting aren't in today's lists.
+- **Mid caps show no drift**, and a slight reversal in the first month. Treat a single index's result
+  with care.
+- Prices move before the report too (run-up t 3–4): some of the news leaks or is anticipated.
+- These figures are before costs, and don't account for shorting constraints on small caps.
 
 ## Volatility test
 

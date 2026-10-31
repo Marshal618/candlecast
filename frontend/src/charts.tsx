@@ -458,3 +458,39 @@ export function VolChart({ interval, times, lines }: { interval: Interval | '1h'
 
   return <div ref={ref} className="chart chart-short" />
 }
+
+// Event days on the time axis: day d sits at a fixed fake date so the chart spaces them evenly
+const EVENT_BASE = 946684800 // 2000-01-01
+const eventDay: TimeLabel = (t) => {
+  const d = Math.round((t - EVENT_BASE) / 86400)
+  return d === 0 ? 'day 0' : `${d > 0 ? '+' : ''}${d}`
+}
+
+export interface EventLine {
+  values: number[] // cumulative abnormal return per day in `days`
+  color: string
+  width?: 1 | 2
+}
+
+// Cumulative abnormal return around earnings reports, one line per surprise group
+export function EventChart({ days, lines }: { days: number[]; lines: EventLine[] }) {
+  const { ref, chart } = useChart('1d', eventDay)
+
+  useEffect(() => {
+    if (!chart || days.length < 2) return
+    const fmt = { type: 'custom' as const, formatter: (v: number) => `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%` }
+    const series = lines.map((l) => {
+      const s = chart.addLineSeries({
+        color: l.color, lineWidth: l.width ?? 1, priceFormat: fmt, priceLineVisible: false, lastValueVisible: false,
+      })
+      s.setData(l.values.map((value, i) => ({ time: ts(EVENT_BASE + days[i] * 86400), value })))
+      return s
+    })
+    chart.timeScale().fitContent()
+    return () => {
+      removeAll(chart, series)
+    }
+  }, [days, lines, chart])
+
+  return <div ref={ref} className="chart" />
+}

@@ -187,3 +187,18 @@ def test_index_universes_and_unknown_symbols_are_skipped(client):
                                               "periods": 4, "samples": 2})
     assert r.status_code == 200, r.text
     assert r.json()["unavailable"] == ["ZZZZNOTREAL"]
+
+
+def test_event_study_and_sector_checks_on_mega_caps(client):
+    u = client.get("/api/universes").json()
+    assert u["sectors"]["AAPL"] == "Information Technology"
+    megas = ["AAPL", "MSFT", "NVDA", "JPM", "XOM", "LLY", "WMT", "HD", "PG", "JNJ", "SPY"]
+    r = client.post("/api/events", json={"symbols": megas, "pre": 5, "post": 20, "groups": 2})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["events"] > 100 and "SPY" in body["no_earnings"]
+    assert len(body["groups"][0]["car"]) == 26
+    assert body["spread"]["reaction"]["mean"] > 0  # beats outperform misses on the day
+    r = client.post("/api/crosssection", json={"symbols": megas[:-1], "models": ["naive"], "periods": 6, "samples": 2})
+    assert r.status_code == 200, r.text
+    assert r.json()["sectors"]["Information Technology"] == 3 and "sector" in r.json()["signals"][0]

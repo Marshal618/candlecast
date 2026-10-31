@@ -35,20 +35,30 @@ def _get(url: str, tries: int = 4) -> str:
     raise AssertionError
 
 
-def fetch(url: str, col: str) -> list[str]:
+def fetch(url: str, col: str) -> dict[str, str | None]:
+    """Ticker -> GICS sector (None if the table has no sector column)."""
     html = _get(url)
     for t in pd.read_html(io.StringIO(html)):
         if col in t.columns and len(t) > 50:
-            # Yahoo writes share classes with a dash (BRK-B), Wikipedia with a dot (BRK.B)
-            return sorted({str(s).strip().replace(".", "-") for s in t[col] if str(s).strip()})
+            sector = next((c for c in t.columns if "Sector" in str(c)), None)
+            out = {}
+            for _, row in t.iterrows():
+                # Yahoo writes share classes with a dash (BRK-B), Wikipedia with a dot (BRK.B)
+                sym = str(row[col]).strip().replace(".", "-")
+                if sym:
+                    out[sym] = str(row[sector]).strip() if sector is not None and pd.notna(row[sector]) else None
+            return out
     raise ValueError(f"No '{col}' table on {url}")
 
 
 def main() -> None:
-    out = {"as_of": date.today().isoformat(), "source": "Wikipedia constituent tables", "universes": {}}
+    out = {"as_of": date.today().isoformat(), "source": "Wikipedia constituent tables", "universes": {}, "sectors": {}}
     for name, (url, col) in SOURCES.items():
-        out["universes"][name] = fetch(url, col)
-        print(f"{name}: {len(out['universes'][name])}", file=sys.stderr)
+        members = fetch(url, col)
+        out["universes"][name] = sorted(members)
+        out["sectors"].update({s: sec for s, sec in members.items() if sec})
+        print(f"{name}: {len(members)}, {sum(v is not None for v in members.values())} with a sector", file=sys.stderr)
+    out["sectors"] = dict(sorted(out["sectors"].items()))
     OUT.write_text(json.dumps(out, indent=1) + "\n")
 
 

@@ -264,9 +264,24 @@ export interface CrossSectionSignal {
     max_drawdown: number
     hit_rate: number
     turnover: number
+    // cost per unit traded (bps) that would eat the whole gross edge; null if there's no edge
+    breakeven_bps: number | null
   }
+  // how similar each ranking is to the last one (high = low turnover)
+  rank_autocorr: number
+  // mean rank ic against returns 0, 1, 2, 3 periods ahead
+  ic_decay: number[]
   equity: number[]
   corr: Partial<Record<Factor, number>>
+  // only when most symbols have a GICS sector
+  sector?: SectorReport
+}
+
+export interface SectorReport {
+  rank_ic: IcStats // signal and returns both ranked within sectors
+  long_short: CrossSectionSignal['long_short'] // bucketed on within-sector ranks
+  by_sector: Record<string, IcStats & { n: number }> // sectors with at least 5 members
+  exposure: Record<string, number> // the plain long-short's average net weight per sector
 }
 
 // Symbols left out of a run: `dropped` had too little history, `unavailable` had no data at all
@@ -279,6 +294,52 @@ export interface IndexUniverses {
   as_of: string
   source: string
   universes: Record<string, string[]>
+  sectors: Record<string, string>
+}
+
+export interface EventStudyRequest {
+  symbols: string[]
+  pre: number
+  post: number
+  groups: number
+}
+
+export interface EventGroup {
+  group: number // 0 = lowest surprise
+  n: number
+  surprise_median: number
+  car: number[] // mean cumulative abnormal return per day in `days`, 0 on day -1
+  se: number[]
+  runup: number
+  reaction: number
+  drift: number
+}
+
+export interface SpreadStat {
+  mean: number
+  t_stat: number
+  n: number // quarters
+}
+
+export interface EventStudyResponse extends Pick<RunCoverage, 'unavailable'> {
+  pre: number
+  post: number
+  latency_ms: number
+  symbols: string[]
+  no_earnings: string[]
+  events: number
+  skipped: number
+  first: number
+  last: number
+  quarters: number
+  days: number[]
+  groups: EventGroup[]
+  spread: {
+    runup: SpreadStat | null
+    reaction: SpreadStat
+    drift: SpreadStat
+    checkpoints: (SpreadStat & { day: number })[]
+  }
 }
 
 export interface ResearchProgress {
@@ -298,6 +359,7 @@ export interface CrossSectionResponse extends RunCoverage {
   periods_per_year: number
   universe: { equity: number[]; mean: number }
   dispersion: number
+  sectors: Record<string, number> | null // members per sector, when the run had sector checks
   signals: CrossSectionSignal[]
 }
 
@@ -561,6 +623,8 @@ export const api = {
   progress: () => request<ResearchProgress>('/api/progress'),
   volatility: (body: VolatilityRequest) =>
     request<VolatilityResponse>('/api/volatility', { method: 'POST', body: JSON.stringify(body) }),
+  events: (body: EventStudyRequest) =>
+    request<EventStudyResponse>('/api/events', { method: 'POST', body: JSON.stringify(body) }),
   crosssection: (body: CrossSectionRequest) =>
     request<CrossSectionResponse>('/api/crosssection', { method: 'POST', body: JSON.stringify(body) }),
   tokens: (body: Record<string, unknown>) =>
