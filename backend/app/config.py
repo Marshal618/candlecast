@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     frontend_dist: Path = BACKEND_DIR.parent / "frontend" / "dist"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
+    # Contact (an email) for the SEC's User-Agent rule; EDGAR signals are off without it
+    sec_contact: str = ""
+
     # Sequences per Kronos forward batch; lower this if you run out of memory
     inference_batch_size: int = 32
 

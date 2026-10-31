@@ -70,7 +70,9 @@ class TokensRequest(BaseModel):
 MAX_UNIVERSE = 700
 
 # Non-price signals rebuilt point-in-time (see services/fundamentals.py)
-Fundamental = Literal["surprise", "revisions", "value", "size"]
+Fundamental = Literal[
+    "surprise", "revisions", "value", "size", "issuance", "profitability", "investment", "accruals", "book"
+]
 
 
 class CrossSectionRequest(BaseModel):
@@ -88,7 +90,7 @@ class CrossSectionRequest(BaseModel):
     temperature: float = Field(1.0, gt=0, le=2.0)
     top_p: float = Field(0.9, gt=0, le=1.0)
     cost_bps: float = Field(5.0, ge=0, le=100)
-    fundamentals: list[Fundamental] = Field([], max_length=4)
+    fundamentals: list[Fundamental] = Field([], max_length=9)
 
 
 class EventStudyRequest(BaseModel):

@@ -60,6 +60,11 @@ export const FUNDAMENTAL_COLORS: Record<Fundamental, string> = {
   revisions: '#a3c47a',
   value: '#c9a2a2',
   size: '#8ab0b8',
+  issuance: '#b8a77a',
+  profitability: '#7fb8a0',
+  investment: '#a08fc0',
+  accruals: '#c0b08f',
+  book: '#9fb0d0',
 }
 
 export const FUNDAMENTAL_LABELS: Record<Fundamental, string> = {
@@ -67,6 +72,11 @@ export const FUNDAMENTAL_LABELS: Record<Fundamental, string> = {
   revisions: 'analyst revisions',
   value: 'earnings yield',
   size: 'small size',
+  issuance: 'buybacks',
+  profitability: 'gross profitability',
+  investment: 'low asset growth',
+  accruals: 'low accruals',
+  book: 'book-to-market',
 }
 
 export const FUNDAMENTAL_HINTS: Record<Fundamental, string> = {
@@ -74,6 +84,11 @@ export const FUNDAMENTAL_HINTS: Record<Fundamental, string> = {
   revisions: 'upgrades + target raises minus downgrades + cuts, last 90 days',
   value: 'last 4 quarters of reported EPS / price',
   size: 'minus log market cap: smaller names score higher',
+  issuance: 'minus the 1-year change in split-adjusted shares: buybacks score high, issuers low',
+  profitability: 'SEC filings: last fiscal year gross profit / total assets',
+  investment: 'SEC filings: minus 1-year total asset growth',
+  accruals: 'SEC filings: minus (net income − operating cash flow) / assets',
+  book: "SEC filings: latest shareholders' equity / market cap",
 }
 
 export const signalLabel = (s: SignalName) =>

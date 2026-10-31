@@ -1,8 +1,8 @@
 """Non-price signals, rebuilt point-in-time so they can be backtested without look-ahead.
 
 Price-only models see one input. Most of what separates real quant signals from them is
-information that isn't in the chart. These four come from data yfinance dates event by event,
-so each rebalance only sees what was public by then:
+information that isn't in the chart. These come from data yfinance and the SEC date event by
+event, so each rebalance only sees what was public by then:
 
 - surprise:  the latest quarterly EPS surprise (reported vs consensus, %), if reported within the
              last 100 days. Post-earnings-announcement drift: prices keep moving in the direction
@@ -12,10 +12,19 @@ so each rebalance only sees what was public by then:
 - value:     earnings yield, the last four reported quarters of EPS over price (Basu 1977).
 - size:      minus log market cap (split-adjusted shares outstanding times price), so smaller
              names score higher, as in the size premium (Banz 1981).
+- issuance:  minus the log change in split-adjusted shares over the last year: firms that issue
+             shares underperform, buyers-back outperform (Pontiff & Woodgate 2008).
+
+From SEC filings (services/edgar.py), counted from the day after the filing date:
+- profitability: last fiscal year's gross profit over total assets (Novy-Marx 2013).
+- investment:    minus total asset growth over the last year (Cooper, Gulen & Schill 2008).
+- accruals:      minus (net income - operating cash flow) / total assets for the last fiscal year:
+                 earnings not backed by cash don't persist (Sloan 1996).
+- book:          book-to-market, the latest shareholders' equity over market cap (Fama & French 1992).
 
 Timing: earnings carry a release time, so one counts at a rebalance if it came out before that
-bar's close (before-open releases count the same day, after-close ones the next). Analyst actions
-and share counts carry dates without reliable time zones, so they count from the next day.
+bar's close (before-open releases count the same day, after-close ones the next). Analyst actions,
+share counts and SEC filing dates carry no reliable time of day, so they count from the next day.
 
 Symbols with no earnings history (ETFs, crypto, indexes) get no fundamentals; at each rebalance
 they and any other gaps take that period's median score, i.e. sit in the middle of the ranking.
@@ -35,12 +44,16 @@ from pathlib import Path
 
 import numpy as np
 
-FUNDAMENTALS = ("surprise", "revisions", "value", "size")
+FUNDAMENTALS = ("surprise", "revisions", "value", "size", "issuance", "profitability", "investment", "accruals", "book")
+EDGAR_SIGNALS = ("profitability", "investment", "accruals", "book")
 DAY = 86400
 SURPRISE_DAYS = 100
 REVISION_DAYS = 90
 EPS_DAYS = 400  # the four quarters summed for earnings yield must all be this recent
 SHARES_DAYS = 120
+YEAR = 365 * DAY
+BALANCE_DAYS = 200  # a balance sheet older than this (period end) is stale; 10-Qs come quarterly
+ANNUAL_DAYS = 460  # likewise a fiscal year that ended this long ago
 TTL = DAY
 
 
@@ -55,6 +68,25 @@ class Fundamentals:
     rate: np.ndarray  # +1 / 0 / -1 per analyst action
     share_t: np.ndarray
     shares: np.ndarray  # split-adjusted to today's share count basis
+    # EDGAR series (see services/edgar.py): name -> (n, 3) [filed, period end, value], by filed
+    facts: dict[str, np.ndarray] = None
+    splits: np.ndarray = None  # (n, 2) [time, ratio], to split-adjust EDGAR share counts
+
+    def __post_init__(self):
+        self.facts = self.facts or {}
+        if self.splits is None:
+            self.splits = np.zeros((0, 2))
+
+    def with_facts(self, facts: dict[str, np.ndarray]) -> "Fundamentals":
+        """These events plus EDGAR series, cover-page share counts put on today's split basis."""
+        facts = dict(facts)
+        if "shares" in facts:
+            s = facts["shares"].copy()
+            for when, ratio in self.splits:
+                s[s[:, 1] < when, 2] *= ratio
+            facts["shares"] = s
+        self.facts = facts
+        return self
 
     @classmethod
     def from_json(cls, d: dict) -> "Fundamentals":
@@ -65,7 +97,8 @@ class Fundamentals:
         et, eps, sur = cols(d.get("earnings", []), 3)
         rt, r = cols(d.get("ratings", []), 2)
         st, sh = cols(d.get("shares", []), 2)
-        return cls(et, eps, sur, rt, r, st, sh)
+        facts = {k: np.array(v, dtype=float).reshape(-1, 3) for k, v in (d.get("facts") or {}).items() if v}
+        return cls(et, eps, sur, rt, r, st, sh, facts, np.array(d.get("splits") or [], dtype=float).reshape(-1, 2))
 
     @classmethod
     def empty(cls) -> "Fundamentals":
@@ -83,10 +116,73 @@ def _cutoffs(at: int, interval: str) -> tuple[int, int]:
     return at + 3600, at - DAY
 
 
+def known(series: np.ndarray | None, cut: int, end: float | None = None, tol: float = 45 * DAY) -> tuple[float, float]:
+    """(period end, value) of the latest period filed before `cut`, using its latest filing by then.
+
+    With `end`, the period ending within `tol` of it instead. (nan, nan) when there is none.
+    """
+    if series is None or len(series) == 0:
+        return np.nan, np.nan
+    s = series[: int(np.searchsorted(series[:, 0], cut, side="left"))]  # filed before the cut
+    if end is not None:
+        s = s[np.abs(s[:, 1] - end) <= tol]
+    if len(s) == 0:
+        return np.nan, np.nan
+    target = s[np.argmin(np.abs(s[:, 1] - end)), 1] if end is not None else s[:, 1].max()
+    last = s[s[:, 1] == target][-1]  # rows are by filing date, so this is the latest (restated) value
+    return float(last[1]), float(last[2])
+
+
+def _shares(f: Fundamentals, at: float, tol: float, cut: float) -> float:
+    """Split-adjusted shares outstanding nearest `at` (within `tol`), as known before `cut`: the SEC
+    cover page where there is one (back to 2009), else Yahoo's series (a few years)."""
+    sec = f.facts.get("shares")
+    if sec is not None and len(sec):
+        _, n = known(sec, cut, at, tol)
+        if n > 0:
+            return n
+    a, b = np.searchsorted(f.share_t, [at - tol, min(at + tol, cut)], side="left")
+    # Median of the window's filings: Yahoo's share series has the odd one-day glitch
+    return float(np.median(f.shares[a:b])) if b > a else np.nan
+
+
+def edgar_scores(f: Fundamentals, cut: int, shares: float, close: float) -> dict[str, float]:
+    """The SEC-filing signals as known before `cut` (NaN = no data or stale)."""
+    out = dict.fromkeys(EDGAR_SIGNALS, np.nan)
+    a_end, assets = known(f.facts.get("assets"), cut)
+    if not np.isfinite(a_end) or cut - a_end > BALANCE_DAYS * DAY or assets <= 0:
+        return out
+    _, prev = known(f.facts.get("assets"), cut, a_end - YEAR)
+    if prev > 0:
+        out["investment"] = -(assets / prev - 1)
+    e_end, equity = known(f.facts.get("equity"), cut)
+    if np.isfinite(e_end) and cut - e_end <= BALANCE_DAYS * DAY and shares > 0 and close > 0:
+        out["book"] = equity / (shares * close)
+
+    # Annual flows over the assets at that fiscal year end
+    def scaled(name):
+        end, v = known(f.facts.get(name), cut)
+        if not np.isfinite(end) or cut - end > ANNUAL_DAYS * DAY:
+            return np.nan, np.nan
+        _, base = known(f.facts.get("assets"), cut, end, tol=10 * DAY)
+        return end, (v / base if base > 0 else np.nan)
+
+    _, g = scaled("gross")
+    out["profitability"] = g
+    n_end, ni = scaled("net_income")
+    c_end, cfo = scaled("cfo")
+    if n_end == c_end:
+        out["accruals"] = -(ni - cfo)
+    return out
+
+
 def symbol_scores(f: Fundamentals, at: int, interval: str, close: float) -> dict[str, float]:
     """Each fundamental for one symbol as known at bar `at` (NaN = no data)."""
     out = dict.fromkeys(FUNDAMENTALS, np.nan)
     e_cut, d_cut = _cutoffs(at, interval)
+    shares = _shares(f, d_cut, SHARES_DAYS * DAY, d_cut)
+    if f.facts:
+        out.update(edgar_scores(f, d_cut, shares, close))
     n = int(np.searchsorted(f.earn_t, e_cut, side="left"))
     if n == 0:
         return out  # not an operating company, or no report yet
@@ -98,10 +194,11 @@ def symbol_scores(f: Fundamentals, at: int, interval: str, close: float) -> dict
     lo, hi = np.searchsorted(f.rate_t, [d_cut - REVISION_DAYS * DAY, d_cut], side="left")
     if hi > lo:
         out["revisions"] = float(f.rate[lo:hi].mean())
-    lo, hi = np.searchsorted(f.share_t, [d_cut - SHARES_DAYS * DAY, d_cut], side="left")
-    if hi > lo and close > 0:
-        # Median of recent filings: Yahoo's share series has the odd one-day glitch
-        out["size"] = float(-np.log(np.median(f.shares[lo:hi]) * close))
+    if shares > 0 and close > 0:
+        out["size"] = float(-np.log(shares * close))
+        before = _shares(f, d_cut - YEAR, 60 * DAY, d_cut)
+        if before > 0:
+            out["issuance"] = float(-np.log(shares / before))
     return out
 
 
@@ -127,7 +224,8 @@ def fill_missing(x: np.ndarray) -> np.ndarray:
 class FundamentalsProvider(ABC):
     @abstractmethod
     def fetch(self, symbol: str) -> dict:
-        """{"earnings": [[t, eps, surprise%]], "ratings": [[t, +-1/0]], "shares": [[t, shares]]}, t ascending."""
+        """{"earnings": [[t, eps, surprise%]], "ratings": [[t, +-1/0]], "shares": [[t, shares]],
+        "splits": [[t, ratio]]}, t ascending."""
 
 
 def _rating(action: str, target: str) -> int:
@@ -170,10 +268,14 @@ class YFinanceFundamentals(FundamentalsProvider):
         except Exception:
             pass
         try:
+            splits = t.splits
+            out["splits"] = [[int(ts.timestamp()), float(r)] for ts, r in splits.items() if r > 0]
+        except Exception:
+            splits = None
+        try:
             sh = t.get_shares_full(start=pd.Timestamp.now() - pd.DateOffset(years=11))
-            if sh is not None and len(sh):
+            if sh is not None and len(sh) and splits is not None:
                 sh = sh[sh > 0].sort_index()
-                splits = t.splits
                 # Prices are split-adjusted; bring old share counts onto the same basis
                 adj = np.ones(len(sh))
                 for when, ratio in splits.items():
@@ -202,7 +304,8 @@ class CachedFundamentals:
         symbol = symbol.strip().upper()
         with self._lock, sqlite3.connect(self.cache_path) as conn:
             row = conn.execute("SELECT fetched_at, payload FROM fundamentals WHERE symbol=?", (symbol,)).fetchone()
-        if row and time.time() - row[0] < TTL:
+        # Payloads cached before split histories were kept count as stale
+        if row and time.time() - row[0] < TTL and ("splits" in row[1] or '"earnings": []' in row[1]):
             return Fundamentals.from_json(json.loads(row[1]))
         try:
             payload = self.provider.fetch(symbol)

@@ -30,7 +30,8 @@ from app.schemas import (
 from app.services import calibration
 from app.services.backtest import run_backtest
 from app.services.crosssection import FACTORS, ScoreCache, build_panel, progress, run_crosssection
-from app.services.fundamentals import FUNDAMENTALS, CachedFundamentals, YFinanceFundamentals
+from app.services.edgar import CachedEdgar, EdgarClient
+from app.services.fundamentals import EDGAR_SIGNALS, FUNDAMENTALS, CachedFundamentals, Fundamentals, YFinanceFundamentals
 from app.services.volatility import run_volatility
 from app.services.events import run_event_study
 from app.services.portfolio import Construction, TrialLog, run_portfolio, study_key
@@ -52,7 +53,18 @@ journal = Journal(settings.journal_path, market)
 scores = ScoreCache(settings.research_path)
 trials = TrialLog(settings.research_path)
 funds = CachedFundamentals(YFinanceFundamentals(), settings.cache_path)
-sims = SimStore(settings.sim_path, market, forecaster, recipes=trials.recipe, fundamentals=funds.get)
+edgar = CachedEdgar(EdgarClient(settings.sec_contact) if settings.sec_contact else None, settings.cache_path)
+
+
+def company_data(symbol: str, filings: bool = True):
+    """Yahoo's dated events for a symbol, plus its SEC filings when asked for."""
+    f = funds.get(symbol)
+    if filings:
+        f.with_facts(Fundamentals.from_json({"facts": edgar.get(symbol)}).facts)
+    return f
+
+
+sims = SimStore(settings.sim_path, market, forecaster, recipes=trials.recipe, fundamentals=company_data)
 
 
 @asynccontextmanager
@@ -283,7 +295,10 @@ async def _fundamentals(symbols, names) -> dict:
     """Point-in-time fundamentals per symbol, fetched only when some are asked for."""
     if not names:
         return {}
-    loaded = await _gather_limited(funds.get, symbols, limit=8)
+    filings = any(n in EDGAR_SIGNALS for n in names)
+    if filings and not edgar.enabled:
+        raise HTTPException(422, "SEC filing signals need KD_SEC_CONTACT (an email) in backend/.env; the SEC requires it.")
+    loaded = await _gather_limited(lambda s: company_data(s, filings), symbols, limit=8)
     return {s: f for s, f in zip(symbols, loaded) if not isinstance(f, Exception)}
 
 

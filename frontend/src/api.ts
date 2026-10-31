@@ -223,7 +223,16 @@ export interface JournalReport {
 
 export type Factor = 'momentum' | 'reversal'
 // Non-price signals rebuilt point-in-time (backend services/fundamentals.py)
-export type Fundamental = 'surprise' | 'revisions' | 'value' | 'size'
+export type Fundamental =
+  | 'surprise'
+  | 'revisions'
+  | 'value'
+  | 'size'
+  | 'issuance'
+  | 'profitability'
+  | 'investment'
+  | 'accruals'
+  | 'book'
 
 export interface CrossSectionRequest {
   symbols: string[]

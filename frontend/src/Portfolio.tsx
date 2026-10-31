@@ -16,7 +16,10 @@ import { RunNote, Slider, Stat } from './ui'
 import { estimate, runningLabel, UNIVERSES, useProgress, useUniverses } from './universes'
 
 // Fundamentals are rebuilt point-in-time; ETFs and crypto have none and sit mid-ranking on them
-const OTHER_SIGNALS: SignalName[] = ['reversal', 'momentum', 'surprise', 'revisions', 'value', 'size', 'naive', 'garch', 'chronos']
+const COMPANY_SIGNALS: SignalName[] = [
+  'surprise', 'revisions', 'value', 'size', 'issuance', 'profitability', 'investment', 'accruals', 'book',
+]
+const OTHER_SIGNALS: SignalName[] = ['reversal', 'momentum', ...COMPANY_SIGNALS, 'naive', 'garch', 'chronos']
 const METHODS: { id: Construction['method']; label: string }[] = [
   { id: 'equal', label: 'equal' },
   { id: 'inverse_vol', label: 'inverse vol' },
@@ -132,7 +135,7 @@ export function PortfolioView({ onError }: { onError: (msg: string | null) => vo
     [result],
   )
 
-  const models = active.filter((s) => !['reversal', 'momentum', 'surprise', 'revisions', 'value', 'size'].includes(s))
+  const models = active.filter((s) => !['reversal', 'momentum', ...COMPANY_SIGNALS].includes(s))
   return (
     <>
       <div className="sim-setup">

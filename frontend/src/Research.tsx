@@ -16,7 +16,10 @@ import { RunNote, Slider, Stat } from './ui'
 import { estimate, runningLabel, UNIVERSES, useProgress, useUniverses } from './universes'
 
 const CHALLENGERS: Challenger[] = ['naive', 'garch', 'chronos']
-const FUNDAMENTALS: Fundamental[] = ['surprise', 'revisions', 'value', 'size']
+const FUNDAMENTAL_GROUPS: [string, Fundamental[]][] = [
+  ['earnings & shares (yahoo, point-in-time)', ['surprise', 'revisions', 'value', 'size', 'issuance']],
+  ['sec filings (point-in-time from filing dates)', ['profitability', 'investment', 'accruals', 'book']],
+]
 
 const label = (s: CrossSectionSignal) => signalLabel(s.name)
 const color = (s: CrossSectionSignal) => signalColor(s.name)
@@ -147,17 +150,19 @@ export function ResearchView({ onError }: { onError: (msg: string | null) => voi
               ))}
             </div>
           </label>
-          <label>
-            fundamentals (stocks only, point-in-time)
-            <div className="rivals">
-              {FUNDAMENTALS.map((f) => (
-                <button key={f} className={funds.includes(f) ? 'active' : ''} onClick={() => toggleFund(f)} title={FUNDAMENTAL_HINTS[f]}>
-                  <i className="dot" style={{ background: signalColor(f) }} />
-                  {signalLabel(f)}
-                </button>
-              ))}
-            </div>
-          </label>
+          {FUNDAMENTAL_GROUPS.map(([title, group]) => (
+            <label key={title}>
+              {title}
+              <div className="rivals">
+                {group.map((f) => (
+                  <button key={f} className={funds.includes(f) ? 'active' : ''} onClick={() => toggleFund(f)} title={FUNDAMENTAL_HINTS[f]}>
+                    <i className="dot" style={{ background: signalColor(f) }} />
+                    {signalLabel(f)}
+                  </button>
+                ))}
+              </div>
+            </label>
+          ))}
           <Slider label="rebalance every (bars)" value={horizon} min={1} max={60} onChange={setHorizon} />
           <Slider label="rebalances" value={periods} min={4} max={60} onChange={setPeriods} />
           <Slider label="buckets" value={Math.min(buckets, Math.max(list.length, 2))} min={2} max={Math.max(2, Math.min(10, list.length))} onChange={setBuckets} />

@@ -202,3 +202,17 @@ def test_event_study_and_sector_checks_on_mega_caps(client):
     r = client.post("/api/crosssection", json={"symbols": megas[:-1], "models": ["naive"], "periods": 6, "samples": 2})
     assert r.status_code == 200, r.text
     assert r.json()["sectors"]["Information Technology"] == 3 and "sector" in r.json()["signals"][0]
+
+
+def test_sec_filing_signals_on_mega_caps(client):
+    from app.config import settings
+
+    if not settings.sec_contact:
+        pytest.skip("KD_SEC_CONTACT not set")
+    megas = ["AAPL", "MSFT", "NVDA", "JPM", "XOM", "LLY", "WMT", "HD", "PG", "JNJ"]
+    r = client.post("/api/crosssection", json={"symbols": megas, "models": ["naive"], "periods": 6, "samples": 2,
+                                              "fundamentals": ["profitability", "investment", "accruals", "book", "issuance"]})
+    assert r.status_code == 200, r.text
+    cov = {s["name"]: s.get("coverage") for s in r.json()["signals"]}
+    assert cov["investment"] == 1.0 and cov["book"] == 1.0
+    assert 0.5 <= cov["profitability"] < 1.0  # banks and oil majors don't report gross profit

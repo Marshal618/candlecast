@@ -110,7 +110,8 @@ backend/
   app/services/crosssection.py universe ranking research: RankIC, bucket and long-short portfolios, factors, sectors
   app/services/events.py      earnings event study: abnormal returns around reports, by surprise
   app/universes.json          S&P 500 / 400 / 600 constituents and GICS sectors (refresh: scripts/update_universes.py)
-  app/services/fundamentals.py point-in-time earnings surprise, analyst revisions, earnings yield, size
+  app/services/fundamentals.py point-in-time company signals: earnings, revisions, value, size, buybacks, SEC accounting
+  app/services/edgar.py       SEC EDGAR XBRL filings (companyfacts) with filing dates, rate-limited and cached
   app/services/volatility.py  volatility forecast test: QLIKE, calibration, Diebold-Mariano vs EWMA
   app/services/portfolio.py   portfolio lab: signal blend, Ledoit-Wolf risk, construction, deflated Sharpe
   app/services/sim.py         market replay engine: order fills, accounts, bots, performance
@@ -206,9 +207,9 @@ treat them as a starting point, not a verdict.
 
 ## Non-price signals
 
-Kronos only sees the chart. The Research tab can rank four signals it can't see, each rebuilt
-**point-in-time** from data yfinance dates event by event, so a rebalance only uses what was public
-by then:
+Kronos only sees the chart. The Research tab can rank nine signals it can't see, each rebuilt
+**point-in-time** from data yfinance and the SEC date event by event, so a rebalance only uses what
+was public by then:
 
 | Signal | Definition | Source paper |
 |---|---|---|
@@ -216,6 +217,68 @@ by then:
 | analyst revisions | upgrades and target raises minus downgrades and cuts, last 90 days, averaged | Womack 1996 |
 | earnings yield | last four reported quarters of EPS / price | Basu 1977 |
 | small size | minus log market cap (split-adjusted shares × price) | Banz 1981 |
+| buybacks | minus the 1-year log change in split-adjusted shares outstanding | Pontiff & Woodgate 2008 |
+| gross profitability | last fiscal year's gross profit / total assets (SEC) | Novy-Marx 2013 |
+| low asset growth | minus 1-year total asset growth (SEC) | Cooper, Gulen & Schill 2008 |
+| low accruals | minus (net income − operating cash flow) / total assets, last fiscal year (SEC) | Sloan 1996 |
+| book-to-market | latest shareholders' equity / market cap (SEC) | Fama & French 1992 |
+
+**SEC filings.** The last four come from EDGAR's free XBRL API (`services/edgar.py`). Every value
+comes with the date its 10-K or 10-Q was filed and counts from the day after. Later filings restate
+earlier periods, and a rebalance uses the latest value filed before it. Share counts come from each
+filing's cover page, split-adjusted with Yahoo's split history, which takes size, buybacks and
+book-to-market back to 2009 rather than the few years Yahoo's share series covers. The SEC requires
+a contact email in every request's User-Agent: set `KD_SEC_CONTACT` in `backend/.env` (it is only
+sent to sec.gov). Without it those four signals are off. Each company's filings are cached for a
+week. The first S&P 500 run, which downloads them all, took about 6½ minutes.
+
+Limits: banks, insurers and oil majors don't report gross profit, so they sit mid-ranking on
+profitability. Companies that tag share counts by class (Alphabet) fall back to Yahoo's count. A
+company re-registered under a new holding company needs its old registrant listed in
+`edgar.PREDECESSORS` (ExxonMobil, 2026). Prices are dividend-adjusted, so market caps, and with
+them book-to-market and earnings yield, read slightly off for big dividend payers further back.
+
+First run of all nine, monthly rebalances (20-day horizon, 60 periods, Oct 2021 to Sep 2026, 5
+buckets, 5 bps):
+
+| Signal | coverage (500) | S&P 500 RankIC t | within sectors t | S&P 600 RankIC t | within sectors t | 600 L/S Sharpe |
+|---|---|---|---|---|---|---|
+| earnings surprise | 98% | 1.73 | **2.39** | 1.53 | 1.45 | 0.29 |
+| buybacks | 98% | 1.52 | 0.67 | 0.92 | 0.46 | −0.30 |
+| gross profitability | 59% | 0.11 | −0.37 | 0.06 | 0.43 | −0.25 |
+| low asset growth | 98% | 0.24 | 0.14 | 0.79 | 0.90 | 0.81 |
+| low accruals | 97% | 0.03 | 0.51 | −0.11 | −0.21 | 0.79 |
+| book-to-market | 97% | −0.01 | −0.12 | 1.50 | 1.43 | 0.76 |
+| small size | 99% | 0.74 | 0.56 | **7.23** | **6.80** | 4.02 |
+
+Over five years the four accounting anomalies show nothing, in large or small caps, with or without
+sectors. They change once a year, so five years is only about five independent bets each. The
+same run over ten years (120 rebalances, Apr 2017 to Oct 2026; 34 S&P 500 and 123 S&P 600 names
+dropped for shorter histories):
+
+| Signal | S&P 500 RankIC t | beyond factors t | within sectors t | S&P 600 RankIC t | within sectors t |
+|---|---|---|---|---|---|
+| earnings surprise | **2.18** | **2.54** | **2.08** | 1.48 | 1.40 |
+| gross profitability | 1.68 | **2.44** | 1.65 | 1.90 | **2.00** |
+| low asset growth | −1.63 | −1.98 | −1.69 | −1.30 | −1.32 |
+| low accruals | 0.78 | 0.92 | 0.92 | 0.26 | 0.09 |
+| book-to-market | −1.14 | −1.77 | −1.22 | 0.35 | 0.77 |
+| buybacks | 0.58 | 0.66 | −0.15 | −0.24 | −0.60 |
+| small size | **2.41** | 1.83 | **2.00** | **6.92** | **7.83** |
+
+What it says:
+
+- **Gross profitability is the one accounting signal with a pulse.** It sits around t 2 in both
+  indexes, and it is not a sector bet. Its coverage is only 57–59%, though: banks, insurers,
+  utilities and oil majors don't report gross profit.
+- **Asset growth and value ran backwards.** In this decade the fast-growing, expensive companies
+  (mostly tech) won. Book-to-market in the S&P 500 is long Financials (+31%) and short Tech (−22%),
+  so it's partly a sector bet, like earnings yield.
+- **Accruals and buybacks: nothing.** That fits the post-publication decay literature
+  (McLean & Pontiff 2016).
+- **Earnings surprise holds up again in large caps**, over twice the sample.
+- Size gets stronger with ten years in the S&P 600. The longer the window, the more today's members
+  are survivors, so it is even less trustworthy than the five-year number.
 
 Earnings count from the bar they were public by (before-open reports the same day, after-close the
 next). Analyst actions and share counts carry dates without time zones, so they count from the next
